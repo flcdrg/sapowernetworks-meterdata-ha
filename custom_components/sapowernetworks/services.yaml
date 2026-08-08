@@ -1,0 +1,3 @@
+refresh:
+  name: Refresh Meter Data
+  description: Trigger an immediate refresh for all loaded SA Power Networks entries.

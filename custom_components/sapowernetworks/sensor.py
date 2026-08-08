@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -82,6 +82,12 @@ async def async_setup_entry(
 class SAPowerNetworksSensor(SAPowerNetworksEntity, SensorEntity):
     """SA Power Networks sensor entity."""
 
+    _ATTRIBUTE_MAP: ClassVar[dict[str, tuple[str, ...]]] = {
+        "rows_imported": ("interval_statistic_ids", "accumulated_statistic_ids"),
+        "interval_rows_imported": ("interval_statistic_ids",),
+        "accumulated_rows_imported": ("accumulated_statistic_ids",),
+    }
+
     def __init__(
         self,
         coordinator: SAPowerNetworksDataUpdateCoordinator,
@@ -101,3 +107,22 @@ class SAPowerNetworksSensor(SAPowerNetworksEntity, SensorEntity):
         if isinstance(value, (datetime, str, int, bool)):
             return value
         return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, list[str]] | None:
+        """Return extra attributes for debug-oriented import counters."""
+        data = self.coordinator.data
+        if not isinstance(data, dict):
+            return None
+
+        attribute_keys = self._ATTRIBUTE_MAP.get(self.entity_description.key)
+        if not attribute_keys:
+            return None
+
+        statistic_ids: list[str] = []
+        for attribute_key in attribute_keys:
+            value = data.get(attribute_key)
+            if isinstance(value, list):
+                statistic_ids.extend(item for item in value if isinstance(item, str))
+
+        return {"statistic_ids": statistic_ids}

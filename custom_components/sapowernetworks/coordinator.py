@@ -62,6 +62,17 @@ class SyncImportStats:
     interval_channels_imported: int = 0
     accumulated_rows_imported: int = 0
     accumulated_channels_imported: int = 0
+    interval_statistic_ids: tuple[str, ...] = ()
+    accumulated_statistic_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ImportBatchResult:
+    """Import results for one sync sub-step."""
+
+    rows_imported: int = 0
+    channels_imported: int = 0
+    statistic_ids: tuple[str, ...] = ()
 
 
 class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
@@ -102,6 +113,10 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
                 "accumulated_channels_imported": (
                     import_stats.accumulated_channels_imported
                 ),
+                "interval_statistic_ids": list(import_stats.interval_statistic_ids),
+                "accumulated_statistic_ids": list(
+                    import_stats.accumulated_statistic_ids
+                ),
                 "last_error": "",
                 "last_sync": datetime.now(tz=UTC),
             }
@@ -121,6 +136,8 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
         interval_channels = 0
         accumulated_rows = 0
         accumulated_channels = 0
+        interval_statistic_ids: list[str] = []
+        accumulated_statistic_ids: list[str] = []
         existing_statistic_ids = await self._async_existing_statistic_ids()
 
         for assignment in assignments:
@@ -130,36 +147,32 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
             )
             fetch_end = datetime.now(tz=UTC)
             if interval_fetch_start < fetch_end:
-                (
-                    rows_imported,
-                    channels_imported,
-                ) = await self._async_sync_interval_statistics(
+                interval_result = await self._async_sync_interval_statistics(
                     assignment,
                     interval_fetch_start,
                     fetch_end,
                 )
-                total_rows += rows_imported
-                total_channels += channels_imported
-                interval_rows += rows_imported
-                interval_channels += channels_imported
+                total_rows += interval_result.rows_imported
+                total_channels += interval_result.channels_imported
+                interval_rows += interval_result.rows_imported
+                interval_channels += interval_result.channels_imported
+                interval_statistic_ids.extend(interval_result.statistic_ids)
 
             summary_fetch_start = await self._async_accumulated_fetch_start(
                 assignment.nmi,
                 existing_statistic_ids,
             )
             if summary_fetch_start < fetch_end:
-                (
-                    rows_imported,
-                    channels_imported,
-                ) = await self._async_sync_accumulated_statistics(
+                accumulated_result = await self._async_sync_accumulated_statistics(
                     assignment,
                     summary_fetch_start,
                     fetch_end,
                 )
-                total_rows += rows_imported
-                total_channels += channels_imported
-                accumulated_rows += rows_imported
-                accumulated_channels += channels_imported
+                total_rows += accumulated_result.rows_imported
+                total_channels += accumulated_result.channels_imported
+                accumulated_rows += accumulated_result.rows_imported
+                accumulated_channels += accumulated_result.channels_imported
+                accumulated_statistic_ids.extend(accumulated_result.statistic_ids)
 
         return SyncImportStats(
             rows_imported=total_rows,
@@ -168,6 +181,8 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
             interval_channels_imported=interval_channels,
             accumulated_rows_imported=accumulated_rows,
             accumulated_channels_imported=accumulated_channels,
+            interval_statistic_ids=tuple(interval_statistic_ids),
+            accumulated_statistic_ids=tuple(accumulated_statistic_ids),
         )
 
     async def _async_sync_interval_statistics(
@@ -175,7 +190,7 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
         assignment: NmiAssignment,
         fetch_start: datetime,
         fetch_end: datetime,
-    ) -> tuple[int, int]:
+    ) -> ImportBatchResult:
         """Import detailed interval statistics for one NMI."""
         raw_csv = await self.client.download_detailed_csv(
             assignment.nmi,
@@ -186,6 +201,7 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
 
         total_rows = 0
         total_channels = 0
+        statistic_ids: list[str] = []
         for (nmi, suffix), readings in parsed.items():
             statistic_id = self._statistic_id(nmi, suffix)
             last_start_ts, last_sum = await self._async_last_statistic_snapshot(
@@ -206,15 +222,20 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
             )
             total_rows += len(statistics)
             total_channels += 1
+            statistic_ids.append(statistic_id)
 
-        return total_rows, total_channels
+        return ImportBatchResult(
+            rows_imported=total_rows,
+            channels_imported=total_channels,
+            statistic_ids=tuple(statistic_ids),
+        )
 
     async def _async_sync_accumulated_statistics(
         self,
         assignment: NmiAssignment,
         fetch_start: datetime,
         fetch_end: datetime,
-    ) -> tuple[int, int]:
+    ) -> ImportBatchResult:
         """Import accumulated summary statistics for one NMI."""
         raw_csv = await self.client.download_accumulated_summary_csv(
             assignment.nmi,
@@ -225,6 +246,7 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
 
         total_rows = 0
         total_channels = 0
+        statistic_ids: list[str] = []
         grouped_periods: dict[str, list[SummaryPeriod]] = {}
         for period in periods:
             grouped_periods.setdefault(period.nmi, []).append(period)
@@ -264,8 +286,13 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
                 )
                 total_rows += len(statistics)
                 total_channels += 1
+                statistic_ids.append(statistic_id)
 
-        return total_rows, total_channels
+        return ImportBatchResult(
+            rows_imported=total_rows,
+            channels_imported=total_channels,
+            statistic_ids=tuple(statistic_ids),
+        )
 
     async def _async_sync_accumulated_statistics_for_nmi(
         self,

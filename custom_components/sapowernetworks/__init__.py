@@ -33,6 +33,7 @@ async def _async_handle_refresh(service_call: ServiceCall) -> None:
 
 
 PLATFORMS: list[Platform] = [
+    Platform.BUTTON,
     Platform.SENSOR,
 ]
 
