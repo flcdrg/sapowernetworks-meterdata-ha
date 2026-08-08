@@ -2,6 +2,8 @@
 
 Home Assistant custom integration for importing SA Power Networks meter data into Recorder long-term statistics.
 
+_Disclaimer: This integration is neither created nor supported by SA Power Networks._
+
 ## Overview
 
 This integration logs in to the SA Power Networks customer portal, fetches interval and accumulated meter data, and writes it into Home Assistant Recorder as external statistics.
@@ -20,18 +22,18 @@ After setup, the integration creates:
 
 - One device named SA Power Networks
 - Status sensors:
-	- Authentication Status
-	- NMI Count
-	- Rows Imported
-	- Interval Rows Imported
-	- Accumulated Periods Imported
-	- Channels Imported
-	- Last Error
-	- Last Successful Sync
+  - Authentication Status
+  - NMI Count
+  - Rows Imported
+  - Interval Rows Imported
+  - Accumulated Periods Imported
+  - Channels Imported
+  - Last Error
+  - Last Successful Sync
 - One button entity:
-	- Refresh Meter Data
+  - Refresh Meter Data
 - One service:
-	- sapowernetworks.refresh
+  - sapowernetworks.refresh
 
 Important: this integration currently imports statistics to Recorder and does not create dedicated per-channel energy sensor entities for every stream.
 
