@@ -25,6 +25,7 @@ from .const import (
     REPORT_TYPE_DETAILED_CSV,
     REPORT_TYPE_SUMMARY_CSV,
 )
+from .parsing import parse_summary_csv
 from .privacy import redact_mapping, redact_text
 
 
@@ -74,6 +75,7 @@ class SAPowerNetworksApiClient:
 
     _VIEWSTATE = "com.salesforce.visualforce.ViewState"
     _VIEWSTATE_MAC = "com.salesforce.visualforce.ViewStateMAC"
+    _VIEWSTATE_CSRF = "com.salesforce.visualforce.ViewStateCSRF"
     _VIEWSTATE_VERSION = "com.salesforce.visualforce.ViewStateVersion"
     _LOGIN_FORM_PREFIX = "loginPage:SiteTemplate:siteLogin:loginComponent:loginForm"
     _HTTP_OK = 200
@@ -234,7 +236,7 @@ class SAPowerNetworksApiClient:
                 ],
             )
             csv = self._extract_results_string(response, "downloadNMIData")
-            if csv.strip():
+            if _is_summary_csv_payload(csv):
                 return csv
         except SAPowerNetworksApiClientError:
             pass
@@ -265,6 +267,7 @@ class SAPowerNetworksApiClient:
             raise SAPowerNetworksApiClientParseError(msg)
 
         form_prefix = "j_id0:SiteTemplate:j_id86"
+        post_url = self._extract_form_action(html, page_url)
         payload = {
             "meter": "Accumulated",
             f"{form_prefix}:selMeterType": "Accumulated",
@@ -273,19 +276,19 @@ class SAPowerNetworksApiClient:
             f"{form_prefix}:frmDate": start.strftime("%d/%m/%Y"),
             f"{form_prefix}:toDate": end.strftime("%d/%m/%Y"),
             f"{form_prefix}:selNumberStreams": "0",
+            f"{form_prefix}:submit": "Request Meter Data",
             self._VIEWSTATE: hidden_inputs[self._VIEWSTATE],
             self._VIEWSTATE_MAC: hidden_inputs[self._VIEWSTATE_MAC],
         }
         if self._VIEWSTATE_VERSION in hidden_inputs:
             payload[self._VIEWSTATE_VERSION] = hidden_inputs[self._VIEWSTATE_VERSION]
+        if self._VIEWSTATE_CSRF in hidden_inputs:
+            payload[self._VIEWSTATE_CSRF] = hidden_inputs[self._VIEWSTATE_CSRF]
 
         async with self._session.post(
-            page_url,
+            post_url,
             data=payload,
-            headers={
-                "Origin": PORTAL_BASE_URL,
-                "Referer": page_url,
-            },
+            headers=self._browser_headers(referer=page_url),
         ) as response:
             return await response.text()
 
@@ -469,11 +472,19 @@ class SAPowerNetworksApiClient:
 
     @staticmethod
     def _extract_hidden_inputs(html: str) -> dict[str, str]:
-        pattern = re.compile(
-            r'<input[^>]*type="hidden"[^>]*name="([^"]+)"[^>]*value="([^"]*)"[^>]*>',
-            re.IGNORECASE,
-        )
-        return dict(pattern.findall(html))
+        tag_pattern = re.compile(r"<input[^>]*>", re.IGNORECASE)
+        attr_pattern = re.compile(r'([A-Za-z_:][A-Za-z0-9_:.:-]*)="([^"]*)"')
+
+        hidden_inputs: dict[str, str] = {}
+        for tag in tag_pattern.findall(html):
+            attributes = dict(attr_pattern.findall(tag))
+            input_type = attributes.get("type", "").lower()
+            name = attributes.get("name")
+            if input_type != "hidden" or not name:
+                continue
+            hidden_inputs[name] = attributes.get("value", "")
+
+        return hidden_inputs
 
     @staticmethod
     def _extract_redirect_link(body: str) -> str | None:
@@ -644,6 +655,16 @@ def _string_or_none(value: Any) -> str | None:
         return None
     text = value.strip()
     return text or None
+
+
+def _is_summary_csv_payload(content: str) -> bool:
+    """Return True when the payload looks like accumulated summary CSV."""
+    stripped = content.strip()
+    if not stripped:
+        return False
+    if stripped.startswith(("100,", "200,", "300,", "400,", "900")):
+        return False
+    return len(parse_summary_csv(content)) > 0
 
 
 def _split_date_range(

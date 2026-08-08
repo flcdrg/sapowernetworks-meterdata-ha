@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
+from typing import Any, Never
 
 import pytest
 
@@ -11,6 +12,7 @@ from custom_components.sapowernetworks.api import (
     SAPowerNetworksApiClient,
     SAPowerNetworksApiClientAuthenticationError,
     SAPowerNetworksApiClientCommunicationError,
+    _is_summary_csv_payload,
     _merge_nem12_chunks,
     _parse_ver,
     _split_date_range,
@@ -55,6 +57,37 @@ def test_extract_form_action_fallback_when_missing() -> None:
         SAPowerNetworksApiClient._extract_form_action("<html></html>", fallback)
         == fallback
     )
+
+
+def test_extract_hidden_inputs_preserves_values() -> None:
+    """Hidden input extraction should preserve values from live-style input tags."""
+    html = (
+        '<input type="hidden" '
+        'name="loginPage:SiteTemplate:siteLogin:loginComponent:loginForm" '
+        'value="loginPage:SiteTemplate:siteLogin:loginComponent:loginForm" />'
+        '<input type="hidden" '
+        'id="com.salesforce.visualforce.ViewState" '
+        'name="com.salesforce.visualforce.ViewState" '
+        'value="viewstate-value" />'
+        '<input type="hidden" '
+        'id="com.salesforce.visualforce.ViewStateVersion" '
+        'name="com.salesforce.visualforce.ViewStateVersion" '
+        'value="1" />'
+        '<input type="hidden" '
+        'id="com.salesforce.visualforce.ViewStateMAC" '
+        'name="com.salesforce.visualforce.ViewStateMAC" '
+        'value="mac-value" />'
+    )
+
+    hidden = SAPowerNetworksApiClient._extract_hidden_inputs(html)
+
+    assert (
+        hidden["loginPage:SiteTemplate:siteLogin:loginComponent:loginForm"]
+        == "loginPage:SiteTemplate:siteLogin:loginComponent:loginForm"
+    )
+    assert hidden["com.salesforce.visualforce.ViewState"] == "viewstate-value"
+    assert hidden["com.salesforce.visualforce.ViewStateVersion"] == "1"
+    assert hidden["com.salesforce.visualforce.ViewStateMAC"] == "mac-value"
 
 
 def test_extract_vf_json() -> None:
@@ -173,6 +206,21 @@ def test_merge_nem12_chunks_deduplicates_wrapper_records() -> None:
     assert merged.endswith("900")
 
 
+def test_is_summary_csv_payload_rejects_nem12_content() -> None:
+    """Detailed NEM12 payloads must not be accepted as accumulated summary CSV."""
+    payload = "200,20012345678,E1B1,E1,E1,,METER1,KWH,05,\n300,20260620,1.0,1.5,A\n900"
+    assert _is_summary_csv_payload(payload) is False
+
+
+def test_is_summary_csv_payload_accepts_summary_content() -> None:
+    """Accumulated summary payloads should be accepted when rows parse cleanly."""
+    payload = (
+        "20012345678,1180281,kWh,A,12/09/2024,12/12/2024,837.000,0.000,1006.000,NN\n"
+        "20012345678,1180281,kWh,A,12/12/2024,18/03/2025,1020.000,12.500,1165.000,NN"
+    )
+    assert _is_summary_csv_payload(payload) is True
+
+
 @pytest.mark.asyncio
 async def test_download_detailed_csv_falls_back_to_chunked_requests(
     monkeypatch,
@@ -232,3 +280,85 @@ async def test_download_detailed_csv_falls_back_to_chunked_requests(
     assert calls[3][1] == end
     assert merged.count("300,") == 3
     assert merged.count("200,20012345678,E1B1,E1,E1,,METER1,KWH,30,") == 1
+
+
+@pytest.mark.asyncio
+async def test_download_accumulated_summary_falls_back_when_rpc_returns_nem12(
+    monkeypatch,
+) -> None:
+    """Accumulated summary fetch should fall back when RPC returns detailed NEM12."""
+    fake_secret = "synthetic-test-value"
+    client = SAPowerNetworksApiClient(
+        username="user@example.com",
+        password=fake_secret,
+        session=None,  # type: ignore[arg-type]
+    )
+    rpc_payload = (
+        "200,20012345678,E1B1,E1,E1,,METER1,KWH,05,\n300,20260620,1.0,1.5,A\n900"
+    )
+    form_payload = (
+        "20012345678,1180281,kWh,A,12/09/2024,12/12/2024,837.000,0.000,1006.000,NN"
+    )
+
+    async def _fake_data_from_method(
+        **_kwargs: Any,
+    ) -> list[dict[str, dict[str, str]]]:
+        return [{"result": {"results": rpc_payload}}]
+
+    async def _fake_form(*_args: Any, **_kwargs: Any) -> str:
+        return form_payload
+
+    monkeypatch.setattr(client, "_data_from_method", _fake_data_from_method)
+    monkeypatch.setattr(
+        client,
+        "_download_accumulated_summary_csv_form",
+        _fake_form,
+    )
+
+    result = await client.download_accumulated_summary_csv(
+        "20012345678",
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 2, 1, tzinfo=UTC),
+    )
+
+    assert result == form_payload
+
+
+@pytest.mark.asyncio
+async def test_download_accumulated_summary_uses_rpc_when_summary_is_valid(
+    monkeypatch,
+) -> None:
+    """Accumulated summary fetch should keep a valid RPC summary response."""
+    fake_secret = "synthetic-test-value"
+    client = SAPowerNetworksApiClient(
+        username="user@example.com",
+        password=fake_secret,
+        session=None,  # type: ignore[arg-type]
+    )
+    rpc_payload = (
+        "20012345678,1180281,kWh,A,12/09/2024,12/12/2024,837.000,0.000,1006.000,NN"
+    )
+
+    async def _fake_data_from_method(
+        **_kwargs: Any,
+    ) -> list[dict[str, dict[str, str]]]:
+        return [{"result": {"results": rpc_payload}}]
+
+    async def _fail_form(*_args: Any, **_kwargs: Any) -> Never:
+        msg = "form fallback should not be used"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(client, "_data_from_method", _fake_data_from_method)
+    monkeypatch.setattr(
+        client,
+        "_download_accumulated_summary_csv_form",
+        _fail_form,
+    )
+
+    result = await client.download_accumulated_summary_csv(
+        "20012345678",
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 2, 1, tzinfo=UTC),
+    )
+
+    assert result == rpc_payload
