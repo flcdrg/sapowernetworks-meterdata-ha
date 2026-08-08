@@ -26,6 +26,7 @@ def test_rows_imported_sensor_exposes_statistic_ids(mock_config_entry) -> None:
             "rows_imported": 5,
             "interval_statistic_ids": ["sapowernetworks:interval_a"],
             "accumulated_statistic_ids": ["sapowernetworks:accumulated_b"],
+            "combined_statistic_ids": ["sapowernetworks:combined_c"],
         },
     )
     entity_description = next(
@@ -41,6 +42,7 @@ def test_rows_imported_sensor_exposes_statistic_ids(mock_config_entry) -> None:
         "statistic_ids": [
             "sapowernetworks:interval_a",
             "sapowernetworks:accumulated_b",
+            "sapowernetworks:combined_c",
         ]
     }
 

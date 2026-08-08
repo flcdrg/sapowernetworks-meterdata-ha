@@ -83,7 +83,11 @@ class SAPowerNetworksSensor(SAPowerNetworksEntity, SensorEntity):
     """SA Power Networks sensor entity."""
 
     _ATTRIBUTE_MAP: ClassVar[dict[str, tuple[str, ...]]] = {
-        "rows_imported": ("interval_statistic_ids", "accumulated_statistic_ids"),
+        "rows_imported": (
+            "interval_statistic_ids",
+            "accumulated_statistic_ids",
+            "combined_statistic_ids",
+        ),
         "interval_rows_imported": ("interval_statistic_ids",),
         "accumulated_rows_imported": ("accumulated_statistic_ids",),
     }

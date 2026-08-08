@@ -40,6 +40,18 @@ def _sample_detailed_csv() -> str:
     )
 
 
+def _sample_detailed_csv_for_nmi_on_day(nmi: str, yyyymmdd: str) -> str:
+    values = ["1.0", "1.5"] + ["" for _ in range(46)]
+    joined = ",".join(values)
+    return "\n".join(
+        [
+            f"200,{nmi},E1B1,E1,E1,,METER1,KWH,30,",
+            f"300,{yyyymmdd},{joined},A,,,{yyyymmdd}235959,",
+            "900",
+        ]
+    )
+
+
 def _sample_summary_csv() -> str:
     return (
         "20012345678,1180281,kWh,A,12/09/2024,12/12/2024,837.000,0.000,1006.000,NN\n"
@@ -577,3 +589,75 @@ async def test_coordinator_imports_accumulated_when_payload_nmi_differs_from_sel
         coordinator._summary_statistic_id(assignment.nmi, "accumulated_import")
         not in imported_statistic_ids
     )
+
+
+async def test_coordinator_imports_combined_when_streams_are_consecutive(
+    hass, mock_config_entry, monkeypatch
+) -> None:
+    """Coordinator should add a combined import stream for consecutive meters."""
+    client = AsyncMock()
+    assignment = NmiAssignment(
+        nmi="20012345678",
+        company="SAPN",
+        meter_serial_number="METER1",
+        meter_type_description="Interval",
+        description="Synthetic",
+        is_default=True,
+    )
+    client.get_nmi_assignments.return_value = [assignment]
+    client.download_detailed_csv.return_value = _sample_detailed_csv_for_nmi_on_day(
+        assignment.nmi,
+        "20250318",
+    )
+    client.download_accumulated_summary_csv.return_value = _sample_summary_csv_for_nmi(
+        assignment.nmi
+    )
+
+    imported: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
+
+    async def _fake_list_statistic_ids(_hass: Any) -> list[dict[str, str]]:
+        return []
+
+    def _fake_add_external_statistics(
+        _hass: Any,
+        metadata: dict[str, Any],
+        statistics: list[dict[str, Any]],
+    ) -> None:
+        imported.append((metadata, list(statistics)))
+
+    monkeypatch.setattr(
+        "custom_components.sapowernetworks.coordinator.async_list_statistic_ids",
+        _fake_list_statistic_ids,
+    )
+    monkeypatch.setattr(
+        "custom_components.sapowernetworks.coordinator.async_add_external_statistics",
+        _fake_add_external_statistics,
+    )
+    monkeypatch.setattr(
+        "custom_components.sapowernetworks.coordinator.get_last_statistics",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "custom_components.sapowernetworks.coordinator.get_instance",
+        lambda _hass: _FakeRecorderInstance(),
+    )
+
+    mock_config_entry.add_to_hass(hass)
+    coordinator = SAPowerNetworksDataUpdateCoordinator(hass, mock_config_entry, client)
+
+    result = await coordinator._async_update_data()
+
+    assert result["combined_rows_imported"] == 2
+    assert result["combined_channels_imported"] == 1
+    assert len(result["combined_statistic_ids"]) == 1
+
+    combined_statistic_id = coordinator._combined_statistic_id(assignment.nmi)
+    combined_rows = []
+    for metadata, statistics in imported:
+        if metadata["statistic_id"] == combined_statistic_id:
+            combined_rows = statistics
+            break
+
+    assert len(combined_rows) == 2
+    assert combined_rows[0]["sum"] == 837.0
+    assert combined_rows[1]["sum"] == 839.5

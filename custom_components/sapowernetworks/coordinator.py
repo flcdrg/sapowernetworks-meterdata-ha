@@ -62,8 +62,11 @@ class SyncImportStats:
     interval_channels_imported: int = 0
     accumulated_rows_imported: int = 0
     accumulated_channels_imported: int = 0
+    combined_rows_imported: int = 0
+    combined_channels_imported: int = 0
     interval_statistic_ids: tuple[str, ...] = ()
     accumulated_statistic_ids: tuple[str, ...] = ()
+    combined_statistic_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -73,6 +76,7 @@ class ImportBatchResult:
     rows_imported: int = 0
     channels_imported: int = 0
     statistic_ids: tuple[str, ...] = ()
+    import_points_by_nmi: dict[str, tuple[tuple[datetime, float], ...]] | None = None
 
 
 class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
@@ -113,10 +117,13 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
                 "accumulated_channels_imported": (
                     import_stats.accumulated_channels_imported
                 ),
+                "combined_rows_imported": import_stats.combined_rows_imported,
+                "combined_channels_imported": import_stats.combined_channels_imported,
                 "interval_statistic_ids": list(import_stats.interval_statistic_ids),
                 "accumulated_statistic_ids": list(
                     import_stats.accumulated_statistic_ids
                 ),
+                "combined_statistic_ids": list(import_stats.combined_statistic_ids),
                 "last_error": "",
                 "last_sync": datetime.now(tz=UTC),
             }
@@ -136,11 +143,15 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
         interval_channels = 0
         accumulated_rows = 0
         accumulated_channels = 0
+        combined_rows = 0
+        combined_channels = 0
         interval_statistic_ids: list[str] = []
         accumulated_statistic_ids: list[str] = []
+        combined_statistic_ids: list[str] = []
         existing_statistic_ids = await self._async_existing_statistic_ids()
 
         for assignment in assignments:
+            interval_result = ImportBatchResult(import_points_by_nmi={})
             interval_fetch_start = await self._async_fetch_start(
                 assignment.nmi,
                 existing_statistic_ids,
@@ -158,6 +169,7 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
                 interval_channels += interval_result.channels_imported
                 interval_statistic_ids.extend(interval_result.statistic_ids)
 
+            accumulated_result = ImportBatchResult(import_points_by_nmi={})
             summary_fetch_start = await self._async_accumulated_fetch_start(
                 assignment.nmi,
                 existing_statistic_ids,
@@ -174,6 +186,22 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
                 accumulated_channels += accumulated_result.channels_imported
                 accumulated_statistic_ids.extend(accumulated_result.statistic_ids)
 
+            interval_points_by_nmi = interval_result.import_points_by_nmi or {}
+            accumulated_points_by_nmi = accumulated_result.import_points_by_nmi or {}
+            for nmi in sorted(
+                set(interval_points_by_nmi).intersection(accumulated_points_by_nmi)
+            ):
+                combined_result = await self._async_sync_combined_import_statistics(
+                    nmi,
+                    accumulated_points_by_nmi[nmi],
+                    interval_points_by_nmi[nmi],
+                )
+                total_rows += combined_result.rows_imported
+                total_channels += combined_result.channels_imported
+                combined_rows += combined_result.rows_imported
+                combined_channels += combined_result.channels_imported
+                combined_statistic_ids.extend(combined_result.statistic_ids)
+
         return SyncImportStats(
             rows_imported=total_rows,
             channels_imported=total_channels,
@@ -181,8 +209,11 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
             interval_channels_imported=interval_channels,
             accumulated_rows_imported=accumulated_rows,
             accumulated_channels_imported=accumulated_channels,
+            combined_rows_imported=combined_rows,
+            combined_channels_imported=combined_channels,
             interval_statistic_ids=tuple(interval_statistic_ids),
             accumulated_statistic_ids=tuple(accumulated_statistic_ids),
+            combined_statistic_ids=tuple(combined_statistic_ids),
         )
 
     async def _async_sync_interval_statistics(
@@ -202,7 +233,21 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
         total_rows = 0
         total_channels = 0
         statistic_ids: list[str] = []
+        import_hourly_totals_by_nmi: dict[str, dict[datetime, float]] = defaultdict(
+            lambda: defaultdict(float)
+        )
         for (nmi, suffix), readings in parsed.items():
+            if self._channel_direction(suffix) == "import":
+                for reading in sorted(readings, key=lambda item: item.interval_start):
+                    if reading.value_kwh is None:
+                        continue
+                    hour_start = reading.interval_start.replace(
+                        minute=0,
+                        second=0,
+                        microsecond=0,
+                    )
+                    import_hourly_totals_by_nmi[nmi][hour_start] += reading.value_kwh
+
             statistic_id = self._statistic_id(nmi, suffix)
             last_start_ts, last_sum = await self._async_last_statistic_snapshot(
                 statistic_id
@@ -228,6 +273,10 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
             rows_imported=total_rows,
             channels_imported=total_channels,
             statistic_ids=tuple(statistic_ids),
+            import_points_by_nmi={
+                nmi: tuple(sorted(hourly_totals.items()))
+                for nmi, hourly_totals in import_hourly_totals_by_nmi.items()
+            },
         )
 
     async def _async_sync_accumulated_statistics(
@@ -247,11 +296,27 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
         total_rows = 0
         total_channels = 0
         statistic_ids: list[str] = []
+        import_points_by_nmi: dict[str, list[tuple[datetime, float]]] = {}
         grouped_periods: dict[str, list[SummaryPeriod]] = {}
         for period in periods:
             grouped_periods.setdefault(period.nmi, []).append(period)
 
         for nmi, nmi_periods in grouped_periods.items():
+            import_points_by_nmi[nmi] = [
+                (
+                    datetime.combine(
+                        period.period_end,
+                        datetime.min.time(),
+                        tzinfo=UTC,
+                    ),
+                    period.import_kwh,
+                )
+                for period in sorted(
+                    nmi_periods,
+                    key=lambda item: (item.period_end, item.period_start),
+                )
+            ]
+
             for direction, direction_periods in (
                 ("accumulated_import", nmi_periods),
                 (
@@ -292,6 +357,66 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
             rows_imported=total_rows,
             channels_imported=total_channels,
             statistic_ids=tuple(statistic_ids),
+            import_points_by_nmi={
+                nmi: tuple(points) for nmi, points in import_points_by_nmi.items()
+            },
+        )
+
+    async def _async_sync_combined_import_statistics(
+        self,
+        nmi: str,
+        accumulated_import_points: tuple[tuple[datetime, float], ...],
+        interval_import_points: tuple[tuple[datetime, float], ...],
+    ) -> ImportBatchResult:
+        """Import a combined stream when source streams are consecutive."""
+        if not accumulated_import_points or not interval_import_points:
+            return ImportBatchResult(import_points_by_nmi={})
+
+        sorted_accumulated = sorted(accumulated_import_points)
+        sorted_interval = sorted(interval_import_points)
+
+        accumulated_end = sorted_accumulated[-1][0]
+        interval_start = sorted_interval[0][0]
+        if interval_start < accumulated_end:
+            return ImportBatchResult(import_points_by_nmi={})
+        if interval_start - accumulated_end > timedelta(days=1):
+            return ImportBatchResult(import_points_by_nmi={})
+
+        combined_points = [
+            (point_start, point_value)
+            for point_start, point_value in sorted_accumulated
+            if point_start < interval_start
+        ]
+        combined_points.extend(
+            (point_start, point_value)
+            for point_start, point_value in sorted_interval
+            if point_start >= interval_start
+        )
+        if not combined_points:
+            return ImportBatchResult(import_points_by_nmi={})
+
+        statistic_id = self._combined_statistic_id(nmi)
+        last_start_ts, last_sum = await self._async_last_statistic_snapshot(
+            statistic_id
+        )
+        statistics = self._build_combined_statistics(
+            combined_points,
+            last_start_ts,
+            last_sum,
+        )
+        if not statistics:
+            return ImportBatchResult(import_points_by_nmi={})
+
+        async_add_external_statistics(
+            self.hass,
+            self._combined_statistic_metadata(nmi, statistic_id),
+            statistics,
+        )
+        return ImportBatchResult(
+            rows_imported=len(statistics),
+            channels_imported=1,
+            statistic_ids=(statistic_id,),
+            import_points_by_nmi={},
         )
 
     async def _async_sync_accumulated_statistics_for_nmi(
@@ -495,6 +620,30 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
 
         return statistics
 
+    def _build_combined_statistics(
+        self,
+        points: list[tuple[datetime, float]],
+        last_start_ts: float | None,
+        running_sum: float,
+    ) -> list[StatisticData]:
+        """Build recorder statistics from mixed accumulated/interval input points."""
+        statistics: list[StatisticData] = []
+        for point_start, point_value in sorted(points):
+            point_start_ts = point_start.timestamp()
+            if last_start_ts is not None and point_start_ts <= last_start_ts:
+                continue
+
+            running_sum += point_value
+            statistics.append(
+                StatisticData(
+                    start=point_start,
+                    state=point_value,
+                    sum=running_sum,
+                )
+            )
+
+        return statistics
+
     def _statistic_metadata(
         self,
         nmi: str,
@@ -537,6 +686,23 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
             unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         )
 
+    def _combined_statistic_metadata(
+        self,
+        nmi: str,
+        statistic_id: str,
+    ) -> StatisticMetaData:
+        """Build recorder metadata for combined import streams."""
+        masked_nmi = mask_identifier(nmi)
+        return StatisticMetaData(
+            mean_type=StatisticMeanType.NONE,
+            has_sum=True,
+            name=f"{STATISTIC_NAME_PREFIX} Combined Import {masked_nmi}",
+            source=DOMAIN,
+            statistic_id=statistic_id,
+            unit_class=EnergyConverter.UNIT_CLASS,
+            unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        )
+
     def _statistic_id(self, nmi: str, suffix: str) -> str:
         """Create a privacy-safe deterministic statistic id for one channel."""
         digest = sha256(nmi.encode("utf-8")).hexdigest()[:12]
@@ -553,6 +719,11 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
         """Create a privacy-safe deterministic statistic id for accumulated data."""
         digest = sha256(nmi.encode("utf-8")).hexdigest()[:12]
         return f"{DOMAIN}:{digest}_{self._slugify(direction)}"
+
+    def _combined_statistic_id(self, nmi: str) -> str:
+        """Create a privacy-safe deterministic statistic id for combined imports."""
+        digest = sha256(nmi.encode("utf-8")).hexdigest()[:12]
+        return f"{DOMAIN}:{digest}_combined_import"
 
     def _summary_statistic_prefix(self, nmi: str) -> str:
         """Return the shared prefix used by accumulated summary statistic ids."""
