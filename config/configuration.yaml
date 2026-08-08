@@ -4,6 +4,8 @@
 frontend:
 api:
 config:
+energy:
+recorder:
 history:
 logbook:
 my:
