@@ -148,6 +148,8 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
         interval_statistic_ids: list[str] = []
         accumulated_statistic_ids: list[str] = []
         combined_statistic_ids: list[str] = []
+        interval_import_points_by_nmi: dict[str, list[tuple[datetime, float]]] = {}
+        accumulated_import_points_by_nmi: dict[str, list[tuple[datetime, float]]] = {}
         existing_statistic_ids = await self._async_existing_statistic_ids()
 
         for assignment in assignments:
@@ -168,6 +170,10 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
                 interval_rows += interval_result.rows_imported
                 interval_channels += interval_result.channels_imported
                 interval_statistic_ids.extend(interval_result.statistic_ids)
+                self._merge_import_points(
+                    interval_import_points_by_nmi,
+                    interval_result.import_points_by_nmi or {},
+                )
 
             accumulated_result = ImportBatchResult(import_points_by_nmi={})
             summary_fetch_start = await self._async_accumulated_fetch_start(
@@ -185,22 +191,25 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
                 accumulated_rows += accumulated_result.rows_imported
                 accumulated_channels += accumulated_result.channels_imported
                 accumulated_statistic_ids.extend(accumulated_result.statistic_ids)
-
-            interval_points_by_nmi = interval_result.import_points_by_nmi or {}
-            accumulated_points_by_nmi = accumulated_result.import_points_by_nmi or {}
-            for nmi in sorted(
-                set(interval_points_by_nmi).intersection(accumulated_points_by_nmi)
-            ):
-                combined_result = await self._async_sync_combined_import_statistics(
-                    nmi,
-                    accumulated_points_by_nmi[nmi],
-                    interval_points_by_nmi[nmi],
+                self._merge_import_points(
+                    accumulated_import_points_by_nmi,
+                    accumulated_result.import_points_by_nmi or {},
                 )
-                total_rows += combined_result.rows_imported
-                total_channels += combined_result.channels_imported
-                combined_rows += combined_result.rows_imported
-                combined_channels += combined_result.channels_imported
-                combined_statistic_ids.extend(combined_result.statistic_ids)
+
+        for pair in self._select_consecutive_stream_pairs(
+            accumulated_import_points_by_nmi,
+            interval_import_points_by_nmi,
+        ):
+            combined_result = await self._async_sync_combined_import_statistics(
+                pair["combined_nmi"],
+                pair["accumulated_points"],
+                pair["interval_points"],
+            )
+            total_rows += combined_result.rows_imported
+            total_channels += combined_result.channels_imported
+            combined_rows += combined_result.rows_imported
+            combined_channels += combined_result.channels_imported
+            combined_statistic_ids.extend(combined_result.statistic_ids)
 
         return SyncImportStats(
             rows_imported=total_rows,
@@ -215,6 +224,70 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
             accumulated_statistic_ids=tuple(accumulated_statistic_ids),
             combined_statistic_ids=tuple(combined_statistic_ids),
         )
+
+    @staticmethod
+    def _merge_import_points(
+        target: dict[str, list[tuple[datetime, float]]],
+        source: dict[str, tuple[tuple[datetime, float], ...]],
+    ) -> None:
+        """Append import points grouped by NMI while preserving order stability."""
+        for nmi, points in source.items():
+            bucket = target.setdefault(nmi, [])
+            bucket.extend(points)
+
+    @staticmethod
+    def _select_consecutive_stream_pairs(
+        accumulated_by_nmi: dict[str, list[tuple[datetime, float]]],
+        interval_by_nmi: dict[str, list[tuple[datetime, float]]],
+    ) -> list[dict[str, str | tuple[tuple[datetime, float], ...]]]:
+        """Match accumulated and interval streams that form one timeline."""
+        candidates: list[tuple[int, float, str, str]] = []
+        for accumulated_nmi, accumulated_points in accumulated_by_nmi.items():
+            if not accumulated_points:
+                continue
+            accumulated_end = max(point_start for point_start, _ in accumulated_points)
+            for interval_nmi, interval_points in interval_by_nmi.items():
+                if not interval_points:
+                    continue
+
+                interval_start = min(point_start for point_start, _ in interval_points)
+                if interval_start < accumulated_end:
+                    continue
+
+                gap = interval_start - accumulated_end
+                if gap > timedelta(days=1):
+                    continue
+
+                same_nmi_rank = 0 if accumulated_nmi == interval_nmi else 1
+                candidates.append(
+                    (
+                        same_nmi_rank,
+                        gap.total_seconds(),
+                        accumulated_nmi,
+                        interval_nmi,
+                    )
+                )
+
+        pairs: list[dict[str, str | tuple[tuple[datetime, float], ...]]] = []
+        used_accumulated_nmis: set[str] = set()
+        used_interval_nmis: set[str] = set()
+        for _rank, _gap_seconds, accumulated_nmi, interval_nmi in sorted(candidates):
+            if accumulated_nmi in used_accumulated_nmis:
+                continue
+            if interval_nmi in used_interval_nmis:
+                continue
+
+            pairs.append(
+                {
+                    "combined_nmi": interval_nmi,
+                    "accumulated_points": tuple(accumulated_by_nmi[accumulated_nmi]),
+                    "interval_points": tuple(interval_by_nmi[interval_nmi]),
+                }
+            )
+            used_accumulated_nmis.add(accumulated_nmi)
+            used_interval_nmis.add(interval_nmi)
+
+        return pairs
 
     async def _async_sync_interval_statistics(
         self,

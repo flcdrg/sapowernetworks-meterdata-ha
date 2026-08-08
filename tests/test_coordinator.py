@@ -661,3 +661,101 @@ async def test_coordinator_imports_combined_when_streams_are_consecutive(
     assert len(combined_rows) == 2
     assert combined_rows[0]["sum"] == 837.0
     assert combined_rows[1]["sum"] == 839.5
+
+
+async def test_coordinator_imports_combined_across_consecutive_nmis(
+    hass, mock_config_entry, monkeypatch
+) -> None:
+    """Coordinator should combine consecutive streams even when NMIs differ."""
+    client = AsyncMock()
+    old_assignment = NmiAssignment(
+        nmi="20011111111",
+        company="SAPN",
+        meter_serial_number="METER1",
+        meter_type_description="Accumulated",
+        description="Old Meter",
+        is_default=False,
+    )
+    new_assignment = NmiAssignment(
+        nmi="20022222222",
+        company="SAPN",
+        meter_serial_number="METER2",
+        meter_type_description="Interval",
+        description="New Meter",
+        is_default=True,
+    )
+    client.get_nmi_assignments.return_value = [old_assignment, new_assignment]
+
+    async def _fake_download_detailed_csv(
+        nmi: str,
+        _start: datetime,
+        _end: datetime,
+    ) -> str:
+        if nmi == new_assignment.nmi:
+            return _sample_detailed_csv_for_nmi_on_day(new_assignment.nmi, "20250318")
+        return ""
+
+    async def _fake_download_accumulated_summary_csv(
+        nmi: str,
+        _start: datetime,
+        _end: datetime,
+    ) -> str:
+        if nmi == old_assignment.nmi:
+            return _sample_summary_csv_for_nmi(old_assignment.nmi)
+        return ""
+
+    client.download_detailed_csv.side_effect = _fake_download_detailed_csv
+    client.download_accumulated_summary_csv.side_effect = (
+        _fake_download_accumulated_summary_csv
+    )
+
+    imported: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
+
+    async def _fake_list_statistic_ids(_hass: Any) -> list[dict[str, str]]:
+        return []
+
+    def _fake_add_external_statistics(
+        _hass: Any,
+        metadata: dict[str, Any],
+        statistics: list[dict[str, Any]],
+    ) -> None:
+        imported.append((metadata, list(statistics)))
+
+    monkeypatch.setattr(
+        "custom_components.sapowernetworks.coordinator.async_list_statistic_ids",
+        _fake_list_statistic_ids,
+    )
+    monkeypatch.setattr(
+        "custom_components.sapowernetworks.coordinator.async_add_external_statistics",
+        _fake_add_external_statistics,
+    )
+    monkeypatch.setattr(
+        "custom_components.sapowernetworks.coordinator.get_last_statistics",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "custom_components.sapowernetworks.coordinator.get_instance",
+        lambda _hass: _FakeRecorderInstance(),
+    )
+
+    mock_config_entry.add_to_hass(hass)
+    coordinator = SAPowerNetworksDataUpdateCoordinator(hass, mock_config_entry, client)
+
+    result = await coordinator._async_update_data()
+
+    assert result["combined_rows_imported"] == 2
+    assert result["combined_channels_imported"] == 1
+    assert len(result["combined_statistic_ids"]) == 1
+
+    combined_statistic_id = coordinator._combined_statistic_id(new_assignment.nmi)
+    assert result["combined_statistic_ids"] == [combined_statistic_id]
+
+    combined_rows = []
+    for metadata, statistics in imported:
+        if metadata["statistic_id"] == combined_statistic_id:
+            combined_rows = statistics
+            break
+
+    assert len(combined_rows) == 2
+    assert combined_rows[0]["sum"] == 837.0
+    assert combined_rows[1]["sum"] == 839.5
