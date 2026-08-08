@@ -504,3 +504,76 @@ async def test_coordinator_imports_multiple_nmis(
         coordinator._summary_statistic_id(second_assignment.nmi, "accumulated_import")
         in imported_statistic_ids
     )
+
+
+async def test_coordinator_imports_accumulated_when_payload_nmi_differs_from_selector(
+    hass, mock_config_entry, monkeypatch
+) -> None:
+    """Accumulated imports should key statistics from parsed payload NMI."""
+    client = AsyncMock()
+    assignment = NmiAssignment(
+        nmi="20012342987",
+        company="SAPN",
+        meter_serial_number="METER1",
+        meter_type_description="Accumulated",
+        description="Synthetic",
+        is_default=True,
+    )
+    payload_nmi = "20012345678"
+    client.get_nmi_assignments.return_value = [assignment]
+    client.download_detailed_csv.return_value = ""
+    client.download_accumulated_summary_csv.return_value = _sample_summary_csv_for_nmi(
+        payload_nmi
+    )
+
+    imported: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
+
+    async def _fake_list_statistic_ids(_hass: Any) -> list[dict[str, str]]:
+        return []
+
+    def _fake_add_external_statistics(
+        _hass: Any,
+        metadata: dict[str, Any],
+        statistics: list[dict[str, Any]],
+    ) -> None:
+        imported.append((metadata, list(statistics)))
+
+    monkeypatch.setattr(
+        "custom_components.sapowernetworks.coordinator.async_list_statistic_ids",
+        _fake_list_statistic_ids,
+    )
+    monkeypatch.setattr(
+        "custom_components.sapowernetworks.coordinator.async_add_external_statistics",
+        _fake_add_external_statistics,
+    )
+    monkeypatch.setattr(
+        "custom_components.sapowernetworks.coordinator.get_last_statistics",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "custom_components.sapowernetworks.coordinator.get_instance",
+        lambda _hass: _FakeRecorderInstance(),
+    )
+
+    mock_config_entry.add_to_hass(hass)
+    coordinator = SAPowerNetworksDataUpdateCoordinator(hass, mock_config_entry, client)
+
+    result = await coordinator._async_update_data()
+
+    assert result["accumulated_rows_imported"] == 3
+    assert result["accumulated_channels_imported"] == 2
+    assert len(imported) == 2
+
+    imported_statistic_ids = {metadata["statistic_id"] for metadata, _ in imported}
+    assert (
+        coordinator._summary_statistic_id(payload_nmi, "accumulated_import")
+        in imported_statistic_ids
+    )
+    assert (
+        coordinator._summary_statistic_id(payload_nmi, "accumulated_export")
+        in imported_statistic_ids
+    )
+    assert (
+        coordinator._summary_statistic_id(assignment.nmi, "accumulated_import")
+        not in imported_statistic_ids
+    )
