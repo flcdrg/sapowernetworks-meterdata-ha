@@ -47,6 +47,13 @@ def _sample_summary_csv() -> str:
     )
 
 
+def _sample_summary_csv_for_nmi(nmi: str) -> str:
+    return (
+        f"{nmi},1180281,kWh,A,12/09/2024,12/12/2024,837.000,0.000,1006.000,NN\n"
+        f"{nmi},1180281,kWh,A,12/12/2024,18/03/2025,1020.000,12.500,1165.000,NN"
+    )
+
+
 async def test_coordinator_imports_new_statistics(
     hass, mock_config_entry, monkeypatch
 ) -> None:
@@ -384,3 +391,116 @@ async def test_coordinator_advances_accumulated_fetch_start(
 
     called_start = client.download_accumulated_summary_csv.await_args.args[1]
     assert called_start == datetime(2025, 10, 16, 0, 0, tzinfo=UTC)
+
+
+async def test_coordinator_imports_multiple_nmis(
+    hass, mock_config_entry, monkeypatch
+) -> None:
+    """Coordinator should create separate statistic streams for each NMI."""
+    client = AsyncMock()
+    first_assignment = NmiAssignment(
+        nmi="20012345678",
+        company="SAPN",
+        meter_serial_number="METER1",
+        meter_type_description="Interval",
+        description="Synthetic One",
+        is_default=True,
+    )
+    second_assignment = NmiAssignment(
+        nmi="20098765432",
+        company="SAPN",
+        meter_serial_number="METER2",
+        meter_type_description="Interval",
+        description="Synthetic Two",
+        is_default=False,
+    )
+    client.get_nmi_assignments.return_value = [first_assignment, second_assignment]
+
+    interval_payloads = {
+        first_assignment.nmi: _sample_detailed_csv(),
+        second_assignment.nmi: _sample_detailed_csv().replace(
+            "20012345678", "20098765432"
+        ),
+    }
+    summary_payloads = {
+        first_assignment.nmi: _sample_summary_csv_for_nmi(first_assignment.nmi),
+        second_assignment.nmi: _sample_summary_csv_for_nmi(second_assignment.nmi),
+    }
+
+    async def _fake_download_detailed_csv(
+        nmi: str,
+        _start: datetime,
+        _end: datetime,
+    ) -> str:
+        return interval_payloads[nmi]
+
+    async def _fake_download_accumulated_summary_csv(
+        nmi: str,
+        _start: datetime,
+        _end: datetime,
+    ) -> str:
+        return summary_payloads[nmi]
+
+    client.download_detailed_csv.side_effect = _fake_download_detailed_csv
+    client.download_accumulated_summary_csv.side_effect = (
+        _fake_download_accumulated_summary_csv
+    )
+
+    imported: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
+
+    async def _fake_list_statistic_ids(_hass: Any) -> list[dict[str, str]]:
+        return []
+
+    def _fake_add_external_statistics(
+        _hass: Any,
+        metadata: dict[str, Any],
+        statistics: list[dict[str, Any]],
+    ) -> None:
+        imported.append((metadata, list(statistics)))
+
+    monkeypatch.setattr(
+        "custom_components.sapowernetworks.coordinator.async_list_statistic_ids",
+        _fake_list_statistic_ids,
+    )
+    monkeypatch.setattr(
+        "custom_components.sapowernetworks.coordinator.async_add_external_statistics",
+        _fake_add_external_statistics,
+    )
+    monkeypatch.setattr(
+        "custom_components.sapowernetworks.coordinator.get_last_statistics",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "custom_components.sapowernetworks.coordinator.get_instance",
+        lambda _hass: _FakeRecorderInstance(),
+    )
+
+    mock_config_entry.add_to_hass(hass)
+    coordinator = SAPowerNetworksDataUpdateCoordinator(hass, mock_config_entry, client)
+
+    result = await coordinator._async_update_data()
+
+    assert result["nmi_count"] == 2
+    assert result["rows_imported"] == 8
+    assert result["channels_imported"] == 6
+    assert result["interval_rows_imported"] == 2
+    assert result["accumulated_rows_imported"] == 6
+    assert len(result["interval_statistic_ids"]) == 2
+    assert len(result["accumulated_statistic_ids"]) == 4
+    assert len(imported) == 6
+
+    imported_statistic_ids = {metadata["statistic_id"] for metadata, _stats in imported}
+    assert (
+        coordinator._statistic_id(first_assignment.nmi, "E1") in imported_statistic_ids
+    )
+    assert (
+        coordinator._statistic_id(second_assignment.nmi, "E1") in imported_statistic_ids
+    )
+    assert (
+        coordinator._summary_statistic_id(first_assignment.nmi, "accumulated_import")
+        in imported_statistic_ids
+    )
+    assert (
+        coordinator._summary_statistic_id(second_assignment.nmi, "accumulated_import")
+        in imported_statistic_ids
+    )
