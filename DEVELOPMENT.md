@@ -17,6 +17,25 @@ Label combinations:
 - `dependencies` + `github-actions`: treat as CI/process-sensitive; verify workflow behavior does not hide compatibility regressions.
 - `dependencies` + `devcontainer`: treat as developer-environment-sensitive; usually mergeable with lighter runtime concern unless shared tooling behavior changes.
 
+## PR Title Auto-Labeler Text Matches
+
+Auto-labeling is based on PR title text patterns configured in `.github/release-drafter.yml`.
+
+| Label     | PR title text the autolabeler looks for                                                                                  | Example title                                   |
+| --------- | ------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------- |
+| `major`   | Conventional commit type with breaking marker: `type(scope)!:`                                                           | `feat(api)!: change login payload format`       |
+| `minor`   | Starts with `feat:` or `feat(scope):`                                                                                    | `feat(coordinator): add combined import stream` |
+| `patch`   | Starts with one of: `fix`, `chore`, `docs`, `refactor`, `perf`, `test`, `ci`, `build`, `style` (with optional `(scope)`) | `fix(api): handle 503 login response`           |
+| `feature` | Starts with `feat:` or `feat(scope):`                                                                                    | `feat(button): add manual refresh control`      |
+| `bug`     | Starts with `fix:` or `fix(scope):`                                                                                      | `fix(config_flow): map portal error correctly`  |
+| `chore`   | Starts with one of: `chore`, `docs`, `refactor`, `perf`, `test`, `ci`, `build`, `style` (with optional `(scope)`)        | `docs: update HA compatibility checklist`       |
+
+Notes:
+
+- Multiple labels can be added from one title (for example, `feat:` adds both `minor` and `feature`).
+- `major` detection uses the `!` breaking-change marker in the type prefix.
+- If a title does not match these patterns, auto-labeling will not add these semantic labels.
+
 ## 1. Change Type Risk Classification
 
 Classify the PR before deciding merge risk:
