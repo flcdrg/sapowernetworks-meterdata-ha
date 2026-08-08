@@ -443,3 +443,59 @@ async def test_download_accumulated_summary_chunks_form_fallback(
     assert calls[0] == (start, start + ACCUMULATED_REPORT_MAX_RANGE)
     assert calls[1] == (start + ACCUMULATED_REPORT_MAX_RANGE, end)
     assert result.count("20012345678") == 2
+
+
+@pytest.mark.asyncio
+async def test_ensure_authenticated_reuses_existing_session(monkeypatch) -> None:
+    """Ensure auth should skip login POST when shared session is already logged in."""
+    fake_secret = "synthetic-test-value"
+    client = SAPowerNetworksApiClient(
+        username="user@example.com",
+        password=fake_secret,
+        session=None,  # type: ignore[arg-type]
+    )
+    calls = {"probe": 0, "login": 0}
+
+    async def _fake_probe() -> bool:
+        calls["probe"] += 1
+        return True
+
+    async def _fake_login() -> None:
+        calls["login"] += 1
+
+    monkeypatch.setattr(client, "_session_appears_authenticated", _fake_probe)
+    monkeypatch.setattr(client, "_perform_login", _fake_login)
+
+    await client._ensure_authenticated()
+
+    assert calls == {"probe": 1, "login": 0}
+    assert client._is_authenticated is True
+
+
+@pytest.mark.asyncio
+async def test_ensure_authenticated_logs_in_when_session_not_authenticated(
+    monkeypatch,
+) -> None:
+    """Ensure auth should fall back to login POST when no valid session exists."""
+    fake_secret = "synthetic-test-value"
+    client = SAPowerNetworksApiClient(
+        username="user@example.com",
+        password=fake_secret,
+        session=None,  # type: ignore[arg-type]
+    )
+    calls = {"probe": 0, "login": 0}
+
+    async def _fake_probe() -> bool:
+        calls["probe"] += 1
+        return False
+
+    async def _fake_login() -> None:
+        calls["login"] += 1
+
+    monkeypatch.setattr(client, "_session_appears_authenticated", _fake_probe)
+    monkeypatch.setattr(client, "_perform_login", _fake_login)
+
+    await client._ensure_authenticated()
+
+    assert calls == {"probe": 1, "login": 1}
+    assert client._is_authenticated is True

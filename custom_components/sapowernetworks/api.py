@@ -7,11 +7,10 @@ import math
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from urllib.parse import urlencode, urljoin
 
-if TYPE_CHECKING:
-    import aiohttp
+import aiohttp
 
 from .const import (
     ACCUMULATED_REPORT_MAX_RANGE,
@@ -329,8 +328,27 @@ class SAPowerNetworksApiClient:
         """Ensure authenticated cookie session exists."""
         if self._is_authenticated and not force:
             return
+        if not force and await self._session_appears_authenticated():
+            self._is_authenticated = True
+            return
         await self._perform_login()
         self._is_authenticated = True
+
+    async def _session_appears_authenticated(self) -> bool:
+        """Check whether the shared HTTP session already has a valid portal login."""
+        dashboard_url = urljoin(PORTAL_BASE_URL + "/meterdata/", CAD_DASHBOARD_PATH)
+        try:
+            async with self._session.get(
+                dashboard_url,
+                headers=self._browser_headers(referer=PORTAL_BASE_URL),
+            ) as response:
+                if response.status != self._HTTP_OK:
+                    return False
+                page = await response.text()
+        except aiohttp.ClientError, TimeoutError:
+            return False
+
+        return bool(self._extract_vf_json(page))
 
     async def _perform_login(self) -> None:
         """Perform SAPN login handshake on Salesforce-backed portal."""
@@ -382,16 +400,24 @@ class SAPowerNetworksApiClient:
             headers=self._browser_headers(referer=page_url),
         ) as response:
             if response.status != self._HTTP_OK:
-                snippet = redact_text((await response.text()).strip()[:300])
+                body_text = await response.text()
+                snippet = redact_text(body_text.strip()[:300])
                 if response.status in {self._HTTP_UNAUTHORIZED, self._HTTP_FORBIDDEN}:
                     msg = f"Login rejected with status: {response.status}"
                     raise SAPowerNetworksApiClientAuthenticationError(msg)
                 if response.status == self._HTTP_SERVICE_UNAVAILABLE:
+                    lowered = body_text.casefold()
+                    if "site_down/maintenance.html" in lowered:
+                        msg = (
+                            "Login portal temporarily unavailable (maintenance page "
+                            f"returned, status 503; response snippet: {snippet})"
+                        )
+                        raise SAPowerNetworksApiClientCommunicationError(msg)
                     msg = (
-                        "Login POST returned 503; likely request-shape mismatch "
-                        f"in integration (response snippet: {snippet})"
+                        "Login portal temporarily unavailable (status 503; "
+                        f"response snippet: {snippet})"
                     )
-                    raise SAPowerNetworksApiClientParseError(msg)
+                    raise SAPowerNetworksApiClientCommunicationError(msg)
                 msg = (
                     f"Login failed with unexpected status: {response.status} "
                     f"(response snippet: {snippet})"
