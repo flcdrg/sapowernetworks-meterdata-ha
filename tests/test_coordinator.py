@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -244,6 +245,8 @@ async def test_coordinator_skips_existing_statistics(
     assert result["interval_statistic_ids"] == []
     assert result["accumulated_statistic_ids"] == []
     assert not imported
+    called_start = client.download_detailed_csv.await_args.args[1]
+    assert called_start == datetime(2026, 6, 20, 1, 0, tzinfo=UTC)
 
 
 async def test_coordinator_imports_accumulated_statistics(
@@ -322,3 +325,62 @@ async def test_coordinator_imports_accumulated_statistics(
     assert by_statistic_id[import_stat_id][0]["sum"] == 837.0
     assert by_statistic_id[import_stat_id][1]["sum"] == 1857.0
     assert by_statistic_id[export_stat_id][0]["sum"] == 12.5
+
+
+async def test_coordinator_advances_accumulated_fetch_start(
+    hass, mock_config_entry, monkeypatch
+) -> None:
+    """Accumulated sync should request data after the latest imported summary period."""
+    client = AsyncMock()
+    assignment = NmiAssignment(
+        nmi="20012345678",
+        company="SAPN",
+        meter_serial_number="METER1",
+        meter_type_description="Accumulated",
+        description="Synthetic",
+        is_default=True,
+    )
+    client.get_nmi_assignments.return_value = [assignment]
+    client.download_detailed_csv.return_value = ""
+    client.download_accumulated_summary_csv.return_value = ""
+
+    accumulated_statistic_id = SAPowerNetworksDataUpdateCoordinator(
+        hass,
+        mock_config_entry,
+        client,
+    )._summary_statistic_id(assignment.nmi, "accumulated_import")
+
+    async def _fake_list_statistic_ids(_hass: Any) -> list[dict[str, str]]:
+        return [{"statistic_id": accumulated_statistic_id}]
+
+    monkeypatch.setattr(
+        "custom_components.sapowernetworks.coordinator.async_list_statistic_ids",
+        _fake_list_statistic_ids,
+    )
+    monkeypatch.setattr(
+        "custom_components.sapowernetworks.coordinator.async_add_external_statistics",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "custom_components.sapowernetworks.coordinator.get_last_statistics",
+        lambda *_args, **_kwargs: {
+            accumulated_statistic_id: [
+                {
+                    "start": 1760486400.0,
+                    "sum": 100.0,
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        "custom_components.sapowernetworks.coordinator.get_instance",
+        lambda _hass: _FakeRecorderInstance(),
+    )
+
+    mock_config_entry.add_to_hass(hass)
+    coordinator = SAPowerNetworksDataUpdateCoordinator(hass, mock_config_entry, client)
+
+    await coordinator._async_update_data()
+
+    called_start = client.download_accumulated_summary_csv.await_args.args[1]
+    assert called_start == datetime(2025, 10, 16, 0, 0, tzinfo=UTC)

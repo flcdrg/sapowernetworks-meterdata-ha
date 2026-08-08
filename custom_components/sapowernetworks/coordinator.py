@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any
 
@@ -374,7 +374,7 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
 
         if not latest_datetimes:
             return INITIAL_BACKFILL_START
-        return min(latest_datetimes)
+        return min(latest_datetimes) + timedelta(hours=1)
 
     async def _async_accumulated_fetch_start(
         self,
@@ -401,7 +401,7 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
 
         if not latest_datetimes:
             return INITIAL_BACKFILL_START
-        return min(latest_datetimes)
+        return min(latest_datetimes) + timedelta(days=1)
 
     async def _async_last_statistic_snapshot(
         self,
