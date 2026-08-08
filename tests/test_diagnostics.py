@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -27,6 +28,9 @@ async def test_config_entry_diagnostics_redacts_sensitive_values(
             "last_error": "",
         }
     )
+    mock_config_entry.runtime_data.last_update_success = True
+    mock_config_entry.runtime_data.last_exception = None
+    mock_config_entry.runtime_data.update_interval = timedelta(hours=24)
 
     diagnostics = await async_get_config_entry_diagnostics(hass, mock_config_entry)
 
@@ -37,3 +41,28 @@ async def test_config_entry_diagnostics_redacts_sensitive_values(
         "sapowernetworks:interval_a"
     ]
     assert diagnostics["coordinator_data"]["rows_imported"] == 4
+    assert diagnostics["coordinator_state"] == {
+        "last_update_success": True,
+        "last_exception_type": None,
+        "has_data": True,
+        "update_interval_seconds": 86400.0,
+    }
+
+
+async def test_config_entry_diagnostics_exposes_exception_type_only(
+    hass,
+    mock_config_entry,
+) -> None:
+    """Diagnostics should expose only the exception class name, not raw messages."""
+    mock_config_entry.runtime_data = SimpleNamespace(data={"last_error": "failed"})
+    mock_config_entry.runtime_data.last_update_success = False
+    mock_config_entry.runtime_data.last_exception = RuntimeError(
+        "raw nmi 20012345678 should not be copied"
+    )
+    mock_config_entry.runtime_data.update_interval = None
+
+    diagnostics = await async_get_config_entry_diagnostics(hass, mock_config_entry)
+
+    assert diagnostics["coordinator_state"]["last_update_success"] is False
+    assert diagnostics["coordinator_state"]["last_exception_type"] == "RuntimeError"
+    assert diagnostics["coordinator_state"]["update_interval_seconds"] is None

@@ -19,8 +19,21 @@ async def async_get_config_entry_diagnostics(
     """Return redacted diagnostics for a config entry."""
     coordinator = config_entry.runtime_data
     coordinator_data = coordinator.data if isinstance(coordinator.data, dict) else {}
+    update_interval_seconds: float | None = None
+    if coordinator.update_interval is not None:
+        update_interval_seconds = coordinator.update_interval.total_seconds()
+
+    last_exception_type: str | None = None
+    if coordinator.last_exception is not None:
+        last_exception_type = type(coordinator.last_exception).__name__
 
     return {
         "config_entry": redact_mapping(config_entry.as_dict()),
         "coordinator_data": redact_mapping(coordinator_data),
+        "coordinator_state": {
+            "last_update_success": coordinator.last_update_success,
+            "last_exception_type": last_exception_type,
+            "has_data": coordinator.data is not None,
+            "update_interval_seconds": update_interval_seconds,
+        },
     }
