@@ -30,7 +30,10 @@ class SAPowerNetworksConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         _errors = {}
         if user_input is not None:
             try:
-                await self._test_credentials()
+                await self._test_credentials(
+                    username=user_input[CONF_USERNAME],
+                    password=user_input[CONF_PASSWORD],
+                )
             except SAPowerNetworksApiClientAuthenticationError as exception:
                 LOGGER.warning(exception)
                 _errors["base"] = "auth"
@@ -68,9 +71,11 @@ class SAPowerNetworksConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=_errors,
         )
 
-    async def _test_credentials(self) -> None:
+    async def _test_credentials(self, username: str, password: str) -> None:
         """Validate credentials against the API."""
         client = SAPowerNetworksApiClient(
+            username=username,
+            password=password,
             session=async_get_clientsession(self.hass),
         )
-        await client.async_get_data()
+        await client.test_credentials()

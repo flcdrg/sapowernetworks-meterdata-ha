@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING
 
-from homeassistant.components.sensor import SensorEntity, SensorEntityDescription
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorEntityDescription,
+)
 
 from .entity import SAPowerNetworksEntity
 
@@ -15,7 +20,23 @@ if TYPE_CHECKING:
     from .coordinator import SAPowerNetworksDataUpdateCoordinator
     from .data import SAPowerNetworksConfigEntry
 
-ENTITY_DESCRIPTIONS: tuple[SensorEntityDescription, ...] = ()
+ENTITY_DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
+    SensorEntityDescription(
+        key="authenticated",
+        name="Authentication Status",
+        icon="mdi:account-check",
+    ),
+    SensorEntityDescription(
+        key="nmi_count",
+        name="NMI Count",
+        icon="mdi:counter",
+    ),
+    SensorEntityDescription(
+        key="last_sync",
+        name="Last Successful Sync",
+        device_class=SensorDeviceClass.TIMESTAMP,
+    ),
+)
 
 
 async def async_setup_entry(
@@ -46,6 +67,12 @@ class SAPowerNetworksSensor(SAPowerNetworksEntity, SensorEntity):
         self.entity_description = entity_description
 
     @property
-    def native_value(self) -> str | None:
+    def native_value(self) -> datetime | str | int | bool | None:
         """Return the native value of the sensor."""
+        data = self.coordinator.data
+        if not isinstance(data, dict):
+            return None
+        value = data.get(self.entity_description.key)
+        if isinstance(value, (datetime, str, int, bool)):
+            return value
         return None

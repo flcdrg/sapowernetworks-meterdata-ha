@@ -12,7 +12,7 @@ from .api import (
     SAPowerNetworksApiClientAuthenticationError,
     SAPowerNetworksApiClientError,
 )
-from .const import DOMAIN, LOGGER
+from .const import DEFAULT_SCAN_INTERVAL, DOMAIN, LOGGER
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -32,7 +32,12 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
         client: SAPowerNetworksApiClient,
     ) -> None:
         """Initialize coordinator."""
-        super().__init__(hass=hass, logger=LOGGER, name=DOMAIN)
+        super().__init__(
+            hass=hass,
+            logger=LOGGER,
+            name=DOMAIN,
+            update_interval=DEFAULT_SCAN_INTERVAL,
+        )
         self.config_entry = config_entry
         self.client = client
 

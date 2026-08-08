@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from homeassistant.const import Platform
+from homeassistant.const import CONF_PASSWORD, CONF_USERNAME, Platform
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import SAPowerNetworksApiClient
@@ -28,7 +28,11 @@ async def async_setup_entry(
     coordinator = SAPowerNetworksDataUpdateCoordinator(
         hass=hass,
         config_entry=entry,
-        client=SAPowerNetworksApiClient(session=async_get_clientsession(hass)),
+        client=SAPowerNetworksApiClient(
+            username=entry.data[CONF_USERNAME],
+            password=entry.data[CONF_PASSWORD],
+            session=async_get_clientsession(hass),
+        ),
     )
     entry.runtime_data = coordinator
     await coordinator.async_config_entry_first_refresh()
