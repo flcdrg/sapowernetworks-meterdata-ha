@@ -1,0 +1,21 @@
+# default_config enables hardware-oriented dependencies (for example
+# bluetooth/go2rtc/usb) that fail in this dev container. Use a minimal
+# local-dev setup instead.
+frontend:
+api:
+config:
+history:
+logbook:
+my:
+sun:
+system_health:
+
+# https://www.home-assistant.io/integrations/homeassistant/
+homeassistant:
+  debug: true
+
+# https://www.home-assistant.io/integrations/logger/
+logger:
+  default: info
+  logs:
+    custom_components.sapowernetworks: debug

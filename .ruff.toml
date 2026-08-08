@@ -1,0 +1,39 @@
+# The contents of this file is based on https://github.com/home-assistant/core/blob/dev/pyproject.toml
+
+target-version = "py314"
+
+[lint]
+select = [
+    "ALL",
+]
+
+ignore = [
+    "ANN401", # Dynamically typed expressions (typing.Any) are disallowed
+    "D203", # no-blank-line-before-class (incompatible with formatter)
+    "D212", # multi-line-summary-first-line (incompatible with formatter)
+    "COM812", # incompatible with formatter
+    "ISC001", # incompatible with formatter
+]
+
+[lint.flake8-pytest-style]
+fixture-parentheses = false
+
+[lint.pyupgrade]
+keep-runtime-typing = true
+
+[lint.mccabe]
+max-complexity = 25
+
+[lint.per-file-ignores]
+"scripts/live_portal_scrape.py" = [
+    "T201", # print is expected for this CLI utility
+]
+"tests/**" = [
+    "ANN001", # fixture arguments are provided dynamically by pytest
+    "ANN201", # test/fixture return annotations are intentionally lightweight
+    "ARG001", # autouse fixtures may include intentionally unused dependencies
+    "PLR2004", # literals in tests improve readability
+    "S101", # asserts are standard in pytest tests
+    "S105", # test tokens/strings are non-production values
+    "SLF001", # testing private helpers is intentional for coordinator/client
+]
