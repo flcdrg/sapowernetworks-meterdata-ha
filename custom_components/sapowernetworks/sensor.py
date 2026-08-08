@@ -32,6 +32,21 @@ ENTITY_DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
         icon="mdi:counter",
     ),
     SensorEntityDescription(
+        key="rows_imported",
+        name="Rows Imported",
+        icon="mdi:database-import",
+    ),
+    SensorEntityDescription(
+        key="channels_imported",
+        name="Channels Imported",
+        icon="mdi:chart-line",
+    ),
+    SensorEntityDescription(
+        key="last_error",
+        name="Last Error",
+        icon="mdi:alert-circle-outline",
+    ),
+    SensorEntityDescription(
         key="last_sync",
         name="Last Successful Sync",
         device_class=SensorDeviceClass.TIMESTAMP,
