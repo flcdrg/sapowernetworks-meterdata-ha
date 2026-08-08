@@ -30,6 +30,7 @@ class SAPowerNetworksConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Handle a flow initialized by the user."""
         _errors = {}
         if user_input is not None:
+            normalized_username = user_input[CONF_USERNAME].strip().casefold()
             try:
                 await self._test_credentials(
                     username=user_input[CONF_USERNAME],
@@ -48,6 +49,8 @@ class SAPowerNetworksConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 LOGGER.exception(exception)
                 _errors["base"] = "unknown"
             else:
+                await self.async_set_unique_id(normalized_username)
+                self._abort_if_unique_id_configured()
                 return self.async_create_entry(
                     title=user_input[CONF_USERNAME],
                     data=user_input,

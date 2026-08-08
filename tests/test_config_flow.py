@@ -6,6 +6,7 @@ import pytest
 from homeassistant.config_entries import SOURCE_USER
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.data_entry_flow import FlowResultType
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.sapowernetworks.api import (
     SAPowerNetworksApiClientAuthenticationError,
@@ -95,3 +96,39 @@ async def test_user_flow_maps_connection_error(hass, monkeypatch) -> None:
 
     assert result["type"] is FlowResultType.FORM
     assert result["errors"] == {"base": "connection"}
+
+
+async def test_user_flow_aborts_when_username_already_configured(
+    hass,
+    monkeypatch,
+) -> None:
+    """A second flow for the same username should abort as already configured."""
+
+    async def _pass_credentials(self, username: str, password: str) -> None:
+        return None
+
+    existing_entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Test User",
+        unique_id="user@example.com",
+        data={
+            CONF_USERNAME: "user@example.com",
+            CONF_PASSWORD: "secret",
+        },
+    )
+    existing_entry.add_to_hass(hass)
+
+    monkeypatch.setattr(
+        SAPowerNetworksConfigFlow,
+        "_test_credentials",
+        _pass_credentials,
+    )
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": SOURCE_USER},
+        data={CONF_USERNAME: "User@Example.com", CONF_PASSWORD: "secret"},
+    )
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
