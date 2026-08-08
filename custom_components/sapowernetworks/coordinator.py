@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any
@@ -51,6 +52,18 @@ if TYPE_CHECKING:
     from .data import SAPowerNetworksConfigEntry
 
 
+@dataclass(frozen=True)
+class SyncImportStats:
+    """Import counters for one coordinator refresh."""
+
+    rows_imported: int = 0
+    channels_imported: int = 0
+    interval_rows_imported: int = 0
+    interval_channels_imported: int = 0
+    accumulated_rows_imported: int = 0
+    accumulated_channels_imported: int = 0
+
+
 class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
     """Class to manage fetching data from the API."""
 
@@ -76,16 +89,20 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
         """Update data via library."""
         try:
             assignments = await self.client.get_nmi_assignments()
-            rows_imported, channels_imported = await self._async_sync_statistics(
-                assignments
-            )
+            import_stats = await self._async_sync_statistics(assignments)
             return {
                 "authenticated": True,
                 "nmi_count": len(assignments),
                 "nmis": [item.nmi for item in assignments],
-                "rows_imported": rows_imported,
-                "channels_imported": channels_imported,
-                "last_error": None,
+                "rows_imported": import_stats.rows_imported,
+                "channels_imported": import_stats.channels_imported,
+                "interval_rows_imported": import_stats.interval_rows_imported,
+                "interval_channels_imported": import_stats.interval_channels_imported,
+                "accumulated_rows_imported": import_stats.accumulated_rows_imported,
+                "accumulated_channels_imported": (
+                    import_stats.accumulated_channels_imported
+                ),
+                "last_error": "",
                 "last_sync": datetime.now(tz=UTC),
             }
         except SAPowerNetworksApiClientAuthenticationError as exception:
@@ -96,10 +113,14 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
     async def _async_sync_statistics(
         self,
         assignments: list[NmiAssignment],
-    ) -> tuple[int, int]:
+    ) -> SyncImportStats:
         """Download, parse, and import interval and accumulated statistics."""
         total_rows = 0
         total_channels = 0
+        interval_rows = 0
+        interval_channels = 0
+        accumulated_rows = 0
+        accumulated_channels = 0
         existing_statistic_ids = await self._async_existing_statistic_ids()
 
         for assignment in assignments:
@@ -119,6 +140,8 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
                 )
                 total_rows += rows_imported
                 total_channels += channels_imported
+                interval_rows += rows_imported
+                interval_channels += channels_imported
 
             summary_fetch_start = await self._async_accumulated_fetch_start(
                 assignment.nmi,
@@ -135,8 +158,17 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
                 )
                 total_rows += rows_imported
                 total_channels += channels_imported
+                accumulated_rows += rows_imported
+                accumulated_channels += channels_imported
 
-        return total_rows, total_channels
+        return SyncImportStats(
+            rows_imported=total_rows,
+            channels_imported=total_channels,
+            interval_rows_imported=interval_rows,
+            interval_channels_imported=interval_channels,
+            accumulated_rows_imported=accumulated_rows,
+            accumulated_channels_imported=accumulated_channels,
+        )
 
     async def _async_sync_interval_statistics(
         self,

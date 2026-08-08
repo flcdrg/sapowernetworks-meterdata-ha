@@ -37,6 +37,16 @@ ENTITY_DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
         icon="mdi:database-import",
     ),
     SensorEntityDescription(
+        key="interval_rows_imported",
+        name="Interval Rows Imported",
+        icon="mdi:chart-histogram",
+    ),
+    SensorEntityDescription(
+        key="accumulated_rows_imported",
+        name="Accumulated Periods Imported",
+        icon="mdi:timeline-clock-outline",
+    ),
+    SensorEntityDescription(
         key="channels_imported",
         name="Channels Imported",
         icon="mdi:chart-line",

@@ -100,6 +100,9 @@ async def test_coordinator_imports_new_statistics(
 
     assert result["rows_imported"] == 1
     assert result["channels_imported"] == 1
+    assert result["interval_rows_imported"] == 1
+    assert result["accumulated_rows_imported"] == 0
+    assert result["last_error"] == ""
     assert imported
     metadata, statistics = imported[0]
     assert metadata["source"] == DOMAIN
@@ -164,6 +167,8 @@ async def test_coordinator_imports_when_payload_nmi_differs_from_selector(
 
     assert result["rows_imported"] == 1
     assert result["channels_imported"] == 1
+    assert result["interval_rows_imported"] == 1
+    assert result["accumulated_rows_imported"] == 0
     assert imported
     metadata, _statistics = imported[0]
     expected_statistic_id = coordinator._statistic_id("20012345678", "E1")
@@ -231,6 +236,8 @@ async def test_coordinator_skips_existing_statistics(
 
     assert result["rows_imported"] == 0
     assert result["channels_imported"] == 0
+    assert result["interval_rows_imported"] == 0
+    assert result["accumulated_rows_imported"] == 0
     assert not imported
 
 
@@ -287,6 +294,8 @@ async def test_coordinator_imports_accumulated_statistics(
 
     assert result["rows_imported"] == 3
     assert result["channels_imported"] == 2
+    assert result["interval_rows_imported"] == 0
+    assert result["accumulated_rows_imported"] == 3
     assert len(imported) == 2
 
     by_statistic_id = {
