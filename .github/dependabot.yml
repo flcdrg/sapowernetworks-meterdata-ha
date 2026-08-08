@@ -4,23 +4,54 @@ updates:
   - package-ecosystem: "devcontainers"
     directory: "/"
     schedule:
-      interval: "daily"
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "devcontainer"
+    groups:
+      devcontainer-patch-minor:
+        dependency-type: "production"
+        update-types:
+          - "minor"
+          - "patch"
     cooldown:
       default-days: 3
 
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "daily"
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "github-actions"
+    groups:
+      actions-patch-minor:
+        dependency-type: "production"
+        update-types:
+          - "minor"
+          - "patch"
     cooldown:
       default-days: 3
 
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
-      interval: "daily"
+      interval: "weekly"
+    open-pull-requests-limit: 8
+    labels:
+      - "dependencies"
+      - "python"
+    groups:
+      python-patch-minor:
+        dependency-type: "production"
+        update-types:
+          - "minor"
+          - "patch"
     cooldown:
       default-days: 3
     ignore:
-      # Dependabot should not update Home Assistant as that should match the homeassistant key in hacs.json
+      # Keep Home Assistant version policy controlled by this repository.
+      # Supported minimum HA is defined in both hacs.json and manifest.json.
       - dependency-name: "homeassistant"

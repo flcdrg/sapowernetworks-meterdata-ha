@@ -12,8 +12,14 @@ permissions: {}
 
 jobs:
   pytest:
-    name: "Pytest"
+    name: "Pytest (${{ matrix.profile }})"
     runs-on: "ubuntu-latest"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: default
+          - profile: min-ha
     steps:
       - name: Checkout the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -30,5 +36,17 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Run tests
+      - name: Run tests (default dependency set)
+        if: matrix.profile == 'default'
         run: uv run pytest
+
+      - name: Run tests (minimum supported Home Assistant)
+        if: matrix.profile == 'min-ha'
+        run: |
+          HA_VERSION="$(python - <<'PY'
+          import json
+          from pathlib import Path
+          print(json.loads(Path('hacs.json').read_text())['homeassistant'])
+          PY
+          )"
+          uv run --with "homeassistant==${HA_VERSION}" pytest
