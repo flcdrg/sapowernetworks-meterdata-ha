@@ -25,6 +25,23 @@ This file helps AI coding agents become productive quickly in this repository.
 - Run the narrowest useful test or lint command early, fix the first failing slice, and only widen scope after that slice passes.
 - Keep commits on a feature branch rather than `main`.
 - Keep changes commit-ready when the user asks for a commit, and prefer conventional commit messages for repo history.
+- For terse follow-up prompts, use deterministic handling:
+	- `errors`: run the narrowest relevant failing check immediately, report the first failure clearly, then fix and re-run.
+	- `continue`: execute the next planned implementation slice without restating the entire plan.
+	- `is X there?`: verify directly in HA/logs/recorder state and answer with evidence.
+- For auth/login failures, do not classify HTTP 503 as outage/transient by default. First inspect response shape/content, compare against prior successful auth in the same run, and only then decide between portal outage vs integration request-shape/auth-session issue.
+- After any user-visible integration change, run a Home Assistant visibility check before wrapping up:
+	- verify entity/service creation,
+	- verify recorder statistics presence where applicable,
+	- provide exact HA navigation path where the user should see the result.
+- Treat `hacs.json` as the single source of truth for minimum Home Assistant version compatibility. Do not add unsupported metadata keys to integration manifest files.
+
+## Commit Protocol
+
+- When the user asks for `commit`, first run `git status --short` and confirm there are staged or stageable changes relevant to the request.
+- If currently on `main`, create/switch to a feature branch before committing.
+- If there is nothing to commit, report cleanly and propose the next concrete action instead of attempting an empty commit.
+- Prefer one focused conventional commit message per logical slice.
 
 ## Architecture Notes
 
@@ -45,6 +62,7 @@ This file helps AI coding agents become productive quickly in this repository.
 - scripts/develop bootstraps dependencies if Home Assistant modules are missing; prefer running scripts/develop from repo root.
 - Root endpoint behavior should be validated against Home Assistant startup logs in [config/home-assistant.log](config/home-assistant.log) when troubleshooting 404 or startup failures.
 - pytest async fixture compatibility depends on [pytest.ini](pytest.ini) using asyncio_mode = auto.
+- `custom_components/*/manifest.json` schema can reject extra keys depending on current HA validator rules; verify compatibility metadata policy in `hacs.json` and CI checks before adding manifest fields.
 
 ## Test Guidance
 

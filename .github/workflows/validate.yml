@@ -14,6 +14,39 @@ on:
 permissions: {}
 
 jobs:
+  ha-version-policy:
+    name: HA version policy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate Home Assistant minimum version metadata
+        run: |
+          python - <<'PY'
+          import json
+          import re
+          from pathlib import Path
+
+          hacs = json.loads(Path("hacs.json").read_text())
+
+          hacs_ha = hacs.get("homeassistant")
+
+          if not hacs_ha:
+              raise SystemExit("hacs.json is missing the 'homeassistant' key")
+          if not isinstance(hacs_ha, str):
+            raise SystemExit("hacs.json 'homeassistant' value must be a string")
+          if not re.fullmatch(r"\d+\.\d+\.\d+", hacs_ha):
+              raise SystemExit(
+              "hacs.json 'homeassistant' must use X.Y.Z format; "
+              f"got {hacs_ha!r}"
+              )
+
+          print(f"HA minimum version policy OK: {hacs_ha}")
+          PY
+
   hassfest: # https://developers.home-assistant.io/blog/2020/04/16/hassfest
     name: Hassfest validation
     runs-on: ubuntu-latest
