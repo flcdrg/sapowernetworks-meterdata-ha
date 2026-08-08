@@ -11,7 +11,7 @@ import re
 from typing import Any
 
 _TOKEN_PATTERNS = (
-    re.compile(r"(?i)(authorization\s*[:=]\s*)([^\s,;]+)"),
+    re.compile(r"(?i)(authorization\s*[:=]\s*)([^\s,;]+(?:\s+[^\s,;]+)?)"),
     re.compile(r"(?i)(csrf\s*[:=]\s*)([^\s,;]+)"),
     re.compile(r"(?i)(cookie\s*[:=]\s*)([^\n]+)"),
     re.compile(r"(?i)(password\s*[:=]\s*)([^\s,;]+)"),
@@ -64,11 +64,19 @@ def redact_mapping(data: dict[str, Any]) -> dict[str, Any]:
             output[key] = "<redacted>"
             continue
 
-        if isinstance(value, str):
-            output[key] = redact_text(value)
-        elif isinstance(value, dict):
-            output[key] = redact_mapping({str(k): v for k, v in value.items()})
-        else:
-            output[key] = value
+        output[key] = _redact_value(value)
 
     return output
+
+
+def _redact_value(value: Any) -> Any:
+    """Redact arbitrary nested values while preserving safe structure."""
+    if isinstance(value, str):
+        return redact_text(value)
+    if isinstance(value, dict):
+        return redact_mapping({str(key): nested for key, nested in value.items()})
+    if isinstance(value, list):
+        return [_redact_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_value(item) for item in value)
+    return value
