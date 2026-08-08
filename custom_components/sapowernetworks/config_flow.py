@@ -13,6 +13,7 @@ from .api import (
     SAPowerNetworksApiClientAuthenticationError,
     SAPowerNetworksApiClientCommunicationError,
     SAPowerNetworksApiClientError,
+    SAPowerNetworksApiClientParseError,
 )
 from .const import DOMAIN, LOGGER
 
@@ -37,6 +38,9 @@ class SAPowerNetworksConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             except SAPowerNetworksApiClientAuthenticationError as exception:
                 LOGGER.warning(exception)
                 _errors["base"] = "auth"
+            except SAPowerNetworksApiClientParseError as exception:
+                LOGGER.warning(exception)
+                _errors["base"] = "portal"
             except SAPowerNetworksApiClientCommunicationError as exception:
                 LOGGER.error(exception)
                 _errors["base"] = "connection"

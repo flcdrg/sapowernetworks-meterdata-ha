@@ -11,6 +11,7 @@
         },
         "error": {
             "auth": "Username/Password is wrong.",
+            "portal": "The SA Power Networks portal returned an unexpected response.",
             "connection": "Unable to connect to the server.",
             "unknown": "Unknown error occurred."
         },
