@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     import aiohttp
 
 from .const import (
+    ACCUMULATED_REPORT_MAX_RANGE,
     CAD_DASHBOARD_PATH,
     CAD_REQUEST_METER_DATA_PATH,
     CAD_SITE_LOGIN_PATH,
@@ -241,7 +242,37 @@ class SAPowerNetworksApiClient:
         except SAPowerNetworksApiClientError:
             pass
 
-        return await self._download_accumulated_summary_csv_form(nmi, start, end)
+        return await self._download_accumulated_summary_csv_form_chunked(
+            nmi,
+            start,
+            end,
+        )
+
+    async def _download_accumulated_summary_csv_form_chunked(
+        self,
+        nmi: str,
+        start: datetime,
+        end: datetime,
+    ) -> str:
+        """Download accumulated summary CSV using bounded form-post windows."""
+        chunks: list[str] = []
+        for block_start, block_end in _split_date_range(
+            start,
+            end,
+            ACCUMULATED_REPORT_MAX_RANGE,
+        ):
+            chunk = await self._download_accumulated_summary_csv_form(
+                nmi,
+                block_start,
+                block_end,
+            )
+            if _is_summary_csv_payload(chunk):
+                chunks.append(chunk)
+
+        if not chunks:
+            return ""
+
+        return _merge_csv_chunks(chunks)
 
     async def _download_accumulated_summary_csv_form(
         self,
@@ -269,7 +300,9 @@ class SAPowerNetworksApiClient:
         form_prefix = "j_id0:SiteTemplate:j_id86"
         post_url = self._extract_form_action(html, page_url)
         payload = {
+            **hidden_inputs,
             "meter": "Accumulated",
+            form_prefix: form_prefix,
             f"{form_prefix}:selMeterType": "Accumulated",
             f"{form_prefix}:selReportType": REPORT_TYPE_SUMMARY_CSV,
             f"{form_prefix}:selNMI": nmi,
@@ -714,3 +747,19 @@ def _merge_nem12_chunks(chunks: list[str]) -> str:
     if footer:
         merged.append(footer)
     return "\n".join(merged)
+
+
+def _merge_csv_chunks(chunks: list[str]) -> str:
+    """Merge CSV chunks by unique non-empty lines while preserving order."""
+    merged_lines: list[str] = []
+    seen_lines: set[str] = set()
+
+    for chunk in chunks:
+        for raw_line in chunk.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+            line = raw_line.strip()
+            if not line or line in seen_lines:
+                continue
+            seen_lines.add(line)
+            merged_lines.append(line)
+
+    return "\n".join(merged_lines)

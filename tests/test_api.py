@@ -13,11 +13,15 @@ from custom_components.sapowernetworks.api import (
     SAPowerNetworksApiClientAuthenticationError,
     SAPowerNetworksApiClientCommunicationError,
     _is_summary_csv_payload,
+    _merge_csv_chunks,
     _merge_nem12_chunks,
     _parse_ver,
     _split_date_range,
 )
-from custom_components.sapowernetworks.const import DETAILED_REPORT_MAX_RANGE
+from custom_components.sapowernetworks.const import (
+    ACCUMULATED_REPORT_MAX_RANGE,
+    DETAILED_REPORT_MAX_RANGE,
+)
 
 
 def test_extract_redirect_link() -> None:
@@ -206,6 +210,31 @@ def test_merge_nem12_chunks_deduplicates_wrapper_records() -> None:
     assert merged.endswith("900")
 
 
+def test_merge_csv_chunks_deduplicates_summary_rows() -> None:
+    """Summary CSV chunks should merge unique rows while preserving order."""
+    chunk_one = (
+        "20012345678,1180281,kWh,A,12/09/2024,12/12/2024,837.000,0.000,1006.000,NN\n"
+        "20012345678,1180281,kWh,A,12/12/2024,18/03/2025,1020.000,12.500,1165.000,NN"
+    )
+    chunk_two = (
+        "20012345678,1180281,kWh,A,12/12/2024,18/03/2025,1020.000,12.500,1165.000,NN\n"
+        "20012345678,1180281,kWh,A,18/03/2025,08/08/2025,999.000,10.000,1100.000,NN"
+    )
+
+    merged = _merge_csv_chunks([chunk_one, chunk_two])
+
+    assert (
+        merged.count(
+            "20012345678,1180281,kWh,A,12/12/2024,18/03/2025,1020.000,12.500,1165.000,NN"
+        )
+        == 1
+    )
+    assert (
+        "20012345678,1180281,kWh,A,18/03/2025,08/08/2025,999.000,10.000,1100.000,NN"
+        in merged
+    )
+
+
 def test_is_summary_csv_payload_rejects_nem12_content() -> None:
     """Detailed NEM12 payloads must not be accepted as accumulated summary CSV."""
     payload = "200,20012345678,E1B1,E1,E1,,METER1,KWH,05,\n300,20260620,1.0,1.5,A\n900"
@@ -362,3 +391,55 @@ async def test_download_accumulated_summary_uses_rpc_when_summary_is_valid(
     )
 
     assert result == rpc_payload
+
+
+@pytest.mark.asyncio
+async def test_download_accumulated_summary_chunks_form_fallback(
+    monkeypatch,
+) -> None:
+    """Accumulated form fallback should split large ranges into bounded windows."""
+    fake_secret = "synthetic-test-value"
+    client = SAPowerNetworksApiClient(
+        username="user@example.com",
+        password=fake_secret,
+        session=None,  # type: ignore[arg-type]
+    )
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2027, 1, 1, tzinfo=UTC)
+    calls: list[tuple[datetime, datetime]] = []
+    chunks = [
+        "20012345678,1180281,kWh,A,01/01/2024,31/12/2024,100.000,0.000,100.000,NN",
+        "20012345678,1180281,kWh,A,01/01/2025,31/12/2025,200.000,0.000,300.000,NN",
+        "20012345678,1180281,kWh,A,01/01/2026,01/01/2027,300.000,0.000,600.000,NN",
+    ]
+
+    async def _fake_data_from_method(
+        **_kwargs: Any,
+    ) -> list[dict[str, dict[str, str]]]:
+        return [{"result": {"results": "200,not-summary"}}]
+
+    async def _fake_form(
+        _nmi: str,
+        block_start: datetime,
+        block_end: datetime,
+    ) -> str:
+        calls.append((block_start, block_end))
+        return chunks[len(calls) - 1]
+
+    monkeypatch.setattr(client, "_data_from_method", _fake_data_from_method)
+    monkeypatch.setattr(
+        client,
+        "_download_accumulated_summary_csv_form",
+        _fake_form,
+    )
+
+    result = await client.download_accumulated_summary_csv(
+        "20012345678",
+        start,
+        end,
+    )
+
+    assert len(calls) == 2
+    assert calls[0] == (start, start + ACCUMULATED_REPORT_MAX_RANGE)
+    assert calls[1] == (start + ACCUMULATED_REPORT_MAX_RANGE, end)
+    assert result.count("20012345678") == 2
