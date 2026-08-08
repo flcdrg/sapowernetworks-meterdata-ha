@@ -98,16 +98,76 @@ async def test_coordinator_imports_new_statistics(
 
     result = await coordinator._async_update_data()
 
-    assert result["rows_imported"] == 2
+    assert result["rows_imported"] == 1
     assert result["channels_imported"] == 1
     assert imported
     metadata, statistics = imported[0]
     assert metadata["source"] == DOMAIN
     assert metadata["statistic_id"].startswith(f"{DOMAIN}:")
     assert "20012345678" not in metadata["statistic_id"]
-    assert len(statistics) == 2
-    assert statistics[0]["sum"] == 1.0
-    assert statistics[1]["sum"] == 2.5
+    assert len(statistics) == 1
+    assert statistics[0]["state"] == 2.5
+    assert statistics[0]["sum"] == 2.5
+
+
+async def test_coordinator_imports_when_payload_nmi_differs_from_selector(
+    hass, mock_config_entry, monkeypatch
+) -> None:
+    """Coordinator should import rows even if payload and selector NMIs differ."""
+    client = AsyncMock()
+    client.get_nmi_assignments.return_value = [
+        NmiAssignment(
+            nmi="20012342987",
+            company="SAPN",
+            meter_serial_number="METER1",
+            meter_type_description="Interval",
+            description="Synthetic",
+            is_default=True,
+        )
+    ]
+    client.download_detailed_csv.return_value = _sample_detailed_csv()
+    client.download_accumulated_summary_csv.return_value = ""
+
+    imported: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
+
+    async def _fake_list_statistic_ids(_hass: Any) -> list[dict[str, str]]:
+        return []
+
+    def _fake_add_external_statistics(
+        _hass: Any,
+        metadata: dict[str, Any],
+        statistics: list[dict[str, Any]],
+    ) -> None:
+        imported.append((metadata, list(statistics)))
+
+    monkeypatch.setattr(
+        "custom_components.sapowernetworks.coordinator.async_list_statistic_ids",
+        _fake_list_statistic_ids,
+    )
+    monkeypatch.setattr(
+        "custom_components.sapowernetworks.coordinator.async_add_external_statistics",
+        _fake_add_external_statistics,
+    )
+    monkeypatch.setattr(
+        "custom_components.sapowernetworks.coordinator.get_last_statistics",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "custom_components.sapowernetworks.coordinator.get_instance",
+        lambda _hass: _FakeRecorderInstance(),
+    )
+
+    mock_config_entry.add_to_hass(hass)
+    coordinator = SAPowerNetworksDataUpdateCoordinator(hass, mock_config_entry, client)
+
+    result = await coordinator._async_update_data()
+
+    assert result["rows_imported"] == 1
+    assert result["channels_imported"] == 1
+    assert imported
+    metadata, _statistics = imported[0]
+    expected_statistic_id = coordinator._statistic_id("20012345678", "E1")
+    assert metadata["statistic_id"] == expected_statistic_id
 
 
 async def test_coordinator_skips_existing_statistics(
@@ -169,11 +229,9 @@ async def test_coordinator_skips_existing_statistics(
 
     result = await coordinator._async_update_data()
 
-    assert result["rows_imported"] == 1
-    assert result["channels_imported"] == 1
-    assert len(imported) == 1
-    assert len(imported[0][1]) == 1
-    assert imported[0][1][0]["sum"] == 2.5
+    assert result["rows_imported"] == 0
+    assert result["channels_imported"] == 0
+    assert not imported
 
 
 async def test_coordinator_imports_accumulated_statistics(

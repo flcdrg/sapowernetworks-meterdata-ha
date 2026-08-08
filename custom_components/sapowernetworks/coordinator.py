@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections import defaultdict
 from datetime import UTC, datetime
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any
@@ -154,9 +155,6 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
         total_rows = 0
         total_channels = 0
         for (nmi, suffix), readings in parsed.items():
-            if nmi != assignment.nmi:
-                continue
-
             statistic_id = self._statistic_id(nmi, suffix)
             last_start_ts, last_sum = await self._async_last_statistic_snapshot(
                 statistic_id
@@ -193,23 +191,69 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
         )
         periods = parse_summary_csv(raw_csv)
 
-        import_periods = [period for period in periods if period.nmi == assignment.nmi]
-        export_periods = [
-            period
-            for period in periods
-            if period.nmi == assignment.nmi and period.export_kwh > 0
-        ]
+        total_rows = 0
+        total_channels = 0
+        grouped_periods: dict[str, list[SummaryPeriod]] = {}
+        for period in periods:
+            grouped_periods.setdefault(period.nmi, []).append(period)
 
+        for nmi, nmi_periods in grouped_periods.items():
+            for direction, direction_periods in (
+                ("accumulated_import", nmi_periods),
+                (
+                    "accumulated_export",
+                    [period for period in nmi_periods if period.export_kwh > 0],
+                ),
+            ):
+                if not direction_periods:
+                    continue
+
+                statistic_id = self._summary_statistic_id(nmi, direction)
+                last_start_ts, last_sum = await self._async_last_statistic_snapshot(
+                    statistic_id
+                )
+                statistics = self._build_summary_statistics(
+                    direction_periods,
+                    direction,
+                    last_start_ts,
+                    last_sum,
+                )
+                if not statistics:
+                    continue
+
+                async_add_external_statistics(
+                    self.hass,
+                    self._summary_statistic_metadata(
+                        nmi,
+                        direction,
+                        statistic_id,
+                    ),
+                    statistics,
+                )
+                total_rows += len(statistics)
+                total_channels += 1
+
+        return total_rows, total_channels
+
+    async def _async_sync_accumulated_statistics_for_nmi(
+        self,
+        nmi: str,
+        nmi_periods: list[SummaryPeriod],
+    ) -> tuple[int, int]:
+        """Build and import accumulated streams for one parsed NMI."""
         total_rows = 0
         total_channels = 0
         for direction, direction_periods in (
-            ("accumulated_import", import_periods),
-            ("accumulated_export", export_periods),
+            ("accumulated_import", nmi_periods),
+            (
+                "accumulated_export",
+                [period for period in nmi_periods if period.export_kwh > 0],
+            ),
         ):
             if not direction_periods:
                 continue
 
-            statistic_id = self._summary_statistic_id(assignment.nmi, direction)
+            statistic_id = self._summary_statistic_id(nmi, direction)
             last_start_ts, last_sum = await self._async_last_statistic_snapshot(
                 statistic_id
             )
@@ -225,7 +269,7 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
             async_add_external_statistics(
                 self.hass,
                 self._summary_statistic_metadata(
-                    assignment.nmi,
+                    nmi,
                     direction,
                     statistic_id,
                 ),
@@ -330,21 +374,28 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
         last_start_ts: float | None,
         running_sum: float,
     ) -> list[StatisticData]:
-        """Build recorder statistics, skipping data already present in recorder."""
+        """Build hourly recorder statistics, skipping data already present."""
         statistics: list[StatisticData] = []
+        hourly_totals: dict[datetime, float] = defaultdict(float)
         for reading in sorted(readings, key=lambda item: item.interval_start):
             if reading.value_kwh is None:
                 continue
 
-            reading_start_ts = reading.interval_start.timestamp()
-            if last_start_ts is not None and reading_start_ts <= last_start_ts:
+            hour_start = reading.interval_start.replace(
+                minute=0, second=0, microsecond=0
+            )
+            hourly_totals[hour_start] += reading.value_kwh
+
+        for hour_start, hour_value in sorted(hourly_totals.items()):
+            hour_start_ts = hour_start.timestamp()
+            if last_start_ts is not None and hour_start_ts <= last_start_ts:
                 continue
 
-            running_sum += reading.value_kwh
+            running_sum += hour_value
             statistics.append(
                 StatisticData(
-                    start=reading.interval_start,
-                    state=reading.value_kwh,
+                    start=hour_start,
+                    state=hour_value,
                     sum=running_sum,
                 )
             )

@@ -6,7 +6,7 @@ import json
 import math
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode, urljoin
 
@@ -17,6 +17,7 @@ from .const import (
     CAD_DASHBOARD_PATH,
     CAD_REQUEST_METER_DATA_PATH,
     CAD_SITE_LOGIN_PATH,
+    DETAILED_REPORT_MAX_RANGE,
     LOGGER,
     PORTAL_BASE_URL,
     PORTAL_COMPANY,
@@ -163,6 +164,36 @@ class SAPowerNetworksApiClient:
         job_id: int = 0,
     ) -> str:
         """Download raw detailed report CSV for one NMI via remoting."""
+        try:
+            return await self._download_detailed_csv_single(nmi, start, end, job_id)
+        except SAPowerNetworksApiClientAuthenticationError:
+            raise
+        except SAPowerNetworksApiClientError:
+            if end - start <= DETAILED_REPORT_MAX_RANGE:
+                raise
+
+        chunks: list[str] = []
+        for block_job_id, (block_start, block_end) in enumerate(
+            _split_date_range(start, end, DETAILED_REPORT_MAX_RANGE),
+        ):
+            chunks.append(
+                await self._download_detailed_csv_single(
+                    nmi,
+                    block_start,
+                    block_end,
+                    block_job_id,
+                )
+            )
+        return _merge_nem12_chunks(chunks)
+
+    async def _download_detailed_csv_single(
+        self,
+        nmi: str,
+        start: datetime,
+        end: datetime,
+        job_id: int,
+    ) -> str:
+        """Download one detailed CSV block for one NMI via remoting."""
         request_path = f"{CAD_REQUEST_METER_DATA_PATH}?{urlencode({'selNMI': nmi})}"
         response = await self._data_from_method(
             path=request_path,
@@ -613,3 +644,52 @@ def _string_or_none(value: Any) -> str | None:
         return None
     text = value.strip()
     return text or None
+
+
+def _split_date_range(
+    start: datetime,
+    end: datetime,
+    max_range: timedelta,
+) -> list[tuple[datetime, datetime]]:
+    """Split a time range into contiguous blocks no larger than max_range."""
+    blocks: list[tuple[datetime, datetime]] = []
+    block_start = start
+    while block_start < end:
+        block_end = min(block_start + max_range, end)
+        blocks.append((block_start, block_end))
+        if block_end >= end:
+            break
+        block_start = block_end
+    return blocks
+
+
+def _merge_nem12_chunks(chunks: list[str]) -> str:
+    """Merge chunked NEM12 CSV responses while de-duplicating repeated wrappers."""
+    header: str | None = None
+    footer: str | None = None
+    body_lines: list[str] = []
+    seen_lines: set[str] = set()
+
+    for chunk in chunks:
+        for raw_line in chunk.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith("100,"):
+                header = header or line
+                continue
+            if line.startswith("900"):
+                footer = footer or line
+                continue
+            if line in seen_lines:
+                continue
+            seen_lines.add(line)
+            body_lines.append(line)
+
+    merged: list[str] = []
+    if header:
+        merged.append(header)
+    merged.extend(body_lines)
+    if footer:
+        merged.append(footer)
+    return "\n".join(merged)
