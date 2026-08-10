@@ -7,9 +7,8 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypedDict
 
-from homeassistant.components.recorder import get_instance
 from homeassistant.components.recorder.models import (
     StatisticData,
     StatisticMeanType,
@@ -22,6 +21,7 @@ from homeassistant.components.recorder.statistics import (
 )
 from homeassistant.const import UnitOfEnergy
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers.recorder import get_instance
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util.unit_conversion import EnergyConverter
 
@@ -79,6 +79,14 @@ class ImportBatchResult:
     statistic_ids: tuple[str, ...] = ()
     import_points_by_nmi: dict[str, tuple[tuple[datetime, float], ...]] | None = None
     latest_interval_data_point: datetime | None = None
+
+
+class CombinedStreamPair(TypedDict):
+    """Matched accumulated and interval streams that can be combined."""
+
+    combined_nmi: str
+    accumulated_points: tuple[tuple[datetime, float], ...]
+    interval_points: tuple[tuple[datetime, float], ...]
 
 
 class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
@@ -331,7 +339,7 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
     def _select_consecutive_stream_pairs(
         accumulated_by_nmi: dict[str, list[tuple[datetime, float]]],
         interval_by_nmi: dict[str, list[tuple[datetime, float]]],
-    ) -> list[dict[str, str | tuple[tuple[datetime, float], ...]]]:
+    ) -> list[CombinedStreamPair]:
         """Match accumulated and interval streams that form one timeline."""
         candidates: list[tuple[int, float, str, str]] = []
         for accumulated_nmi, accumulated_points in accumulated_by_nmi.items():
@@ -360,7 +368,7 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
                     )
                 )
 
-        pairs: list[dict[str, str | tuple[tuple[datetime, float], ...]]] = []
+        pairs: list[CombinedStreamPair] = []
         used_accumulated_nmis: set[str] = set()
         used_interval_nmis: set[str] = set()
         for _rank, _gap_seconds, accumulated_nmi, interval_nmi in sorted(candidates):
