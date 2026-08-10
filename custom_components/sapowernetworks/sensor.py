@@ -52,6 +52,13 @@ ENTITY_DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
         icon="mdi:chart-line",
     ),
     SensorEntityDescription(
+        key="feed_lag_hours",
+        name="Feed Lag",
+        icon="mdi:clock-alert-outline",
+        native_unit_of_measurement="h",
+        suggested_display_precision=2,
+    ),
+    SensorEntityDescription(
         key="last_error",
         name="Last Error",
         icon="mdi:alert-circle-outline",
@@ -102,13 +109,13 @@ class SAPowerNetworksSensor(SAPowerNetworksEntity, SensorEntity):
         self.entity_description = entity_description
 
     @property
-    def native_value(self) -> datetime | str | int | bool | None:
+    def native_value(self) -> datetime | str | int | float | bool | None:
         """Return the native value of the sensor."""
         data = self.coordinator.data
         if not isinstance(data, dict):
             return None
         value = data.get(self.entity_description.key)
-        if isinstance(value, (datetime, str, int, bool)):
+        if isinstance(value, (datetime, str, int, float, bool)):
             return value
         return None
 

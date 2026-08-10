@@ -263,6 +263,8 @@ async def test_coordinator_skips_existing_statistics(
     assert result["accumulated_rows_imported"] == 0
     assert result["interval_statistic_ids"] == []
     assert result["accumulated_statistic_ids"] == []
+    assert isinstance(result["feed_lag_hours"], float)
+    assert isinstance(result["latest_interval_data_point"], datetime)
     assert not imported
     called_start = client.download_detailed_csv.await_args.args[1]
     assert called_start == datetime(2026, 6, 20, 1, 0, tzinfo=UTC)
