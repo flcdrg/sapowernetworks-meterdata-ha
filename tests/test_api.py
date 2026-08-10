@@ -108,6 +108,20 @@ def test_extract_vf_json() -> None:
     )
 
 
+def test_extract_vf_json_with_whitespace_before_closure() -> None:
+    """VF helper should tolerate whitespace/newlines around the remoting call."""
+    content = (
+        "<html><script>Manager.add(new RemotingProviderImpl(\n"
+        '{"vf":{"vid":"066XYZ"},"actions":{},"service":"meterdata/apexremote"}\n'
+        "));</script></html>"
+    )
+    extracted = SAPowerNetworksApiClient._extract_vf_json(content)
+    assert (
+        extracted
+        == '{"vf":{"vid":"066XYZ"},"actions":{},"service":"meterdata/apexremote"}'
+    )
+
+
 def test_resolve_method_uses_last_action_match() -> None:
     """Method resolver should use the last action containing the method name."""
     data_keys = json.dumps(
