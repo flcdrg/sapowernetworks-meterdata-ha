@@ -114,3 +114,23 @@ def test_last_error_sensor_returns_string_without_extra_attributes(
 
     assert sensor.native_value == "portal timeout"
     assert sensor.extra_state_attributes is None
+
+
+def test_feed_lag_sensor_returns_float_value(mock_config_entry) -> None:
+    """Feed Lag sensor should expose a numeric lag in hours."""
+    coordinator = _build_coordinator(
+        mock_config_entry,
+        {
+            "feed_lag_hours": 9.75,
+        },
+    )
+    entity_description = next(
+        description
+        for description in ENTITY_DESCRIPTIONS
+        if description.key == "feed_lag_hours"
+    )
+
+    sensor = SAPowerNetworksSensor(coordinator, entity_description)
+
+    assert sensor.native_value == 9.75
+    assert sensor.extra_state_attributes is None
