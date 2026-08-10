@@ -569,14 +569,35 @@ class SAPowerNetworksApiClient:
 
     @staticmethod
     def _extract_vf_json(text: str) -> str | None:
-        marker = '{"vf":{"vid":"'
+        marker = '{"vf":'
         start = text.find(marker)
         if start < 0:
             return None
-        end = text.find('"}));', start)
-        if end < 0:
-            return None
-        return text[start : end + 2]
+
+        depth = 0
+        in_string = False
+        escaped = False
+        for index in range(start, len(text)):
+            char = text[index]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+
+            if char == '"':
+                in_string = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start : index + 1]
+
+        return None
 
     @staticmethod
     def _resolve_method_from_json(json_text: str, method_name: str) -> SalesforceMethod:
