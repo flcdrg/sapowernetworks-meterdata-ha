@@ -7,9 +7,8 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypedDict
 
-from homeassistant.components.recorder import get_instance
 from homeassistant.components.recorder.models import (
     StatisticData,
     StatisticMeanType,
@@ -22,6 +21,7 @@ from homeassistant.components.recorder.statistics import (
 )
 from homeassistant.const import UnitOfEnergy
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers.recorder import get_instance
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util.unit_conversion import EnergyConverter
 
@@ -79,6 +79,14 @@ class ImportBatchResult:
     statistic_ids: tuple[str, ...] = ()
     import_points_by_nmi: dict[str, tuple[tuple[datetime, float], ...]] | None = None
     latest_interval_data_point: datetime | None = None
+
+
+class CombinedStreamPair(TypedDict):
+    """Matched accumulated and interval streams that can be combined."""
+
+    combined_nmi: str
+    accumulated_points: tuple[tuple[datetime, float], ...]
+    interval_points: tuple[tuple[datetime, float], ...]
 
 
 class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
@@ -163,6 +171,7 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
         interval_import_points_by_nmi: dict[str, list[tuple[datetime, float]]] = {}
         accumulated_import_points_by_nmi: dict[str, list[tuple[datetime, float]]] = {}
         existing_statistic_ids = await self._async_existing_statistic_ids()
+        fetch_end = datetime.now(tz=UTC)
 
         for assignment in assignments:
             interval_result = ImportBatchResult(import_points_by_nmi={})
@@ -170,24 +179,35 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
                 assignment.nmi,
                 existing_statistic_ids,
             )
-            fetch_end = datetime.now(tz=UTC)
             if interval_fetch_start < fetch_end:
                 interval_result = await self._async_sync_interval_statistics(
                     assignment,
                     interval_fetch_start,
                     fetch_end,
                 )
-                total_rows += interval_result.rows_imported
-                total_channels += interval_result.channels_imported
-                interval_rows += interval_result.rows_imported
-                interval_channels += interval_result.channels_imported
-                interval_statistic_ids.extend(interval_result.statistic_ids)
+                (
+                    total_rows,
+                    total_channels,
+                    interval_rows,
+                    interval_channels,
+                ) = self._accumulate_batch_result(
+                    interval_result,
+                    counters=(
+                        total_rows,
+                        total_channels,
+                        interval_rows,
+                        interval_channels,
+                    ),
+                    statistic_ids=interval_statistic_ids,
+                )
                 if interval_result.latest_interval_data_point is not None and (
                     latest_interval_data_point is None
                     or interval_result.latest_interval_data_point
                     > latest_interval_data_point
                 ):
-                    latest_interval_data_point = interval_result.latest_interval_data_point
+                    latest_interval_data_point = (
+                        interval_result.latest_interval_data_point
+                    )
                 self._merge_import_points(
                     interval_import_points_by_nmi,
                     interval_result.import_points_by_nmi or {},
@@ -204,11 +224,21 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
                     summary_fetch_start,
                     fetch_end,
                 )
-                total_rows += accumulated_result.rows_imported
-                total_channels += accumulated_result.channels_imported
-                accumulated_rows += accumulated_result.rows_imported
-                accumulated_channels += accumulated_result.channels_imported
-                accumulated_statistic_ids.extend(accumulated_result.statistic_ids)
+                (
+                    total_rows,
+                    total_channels,
+                    accumulated_rows,
+                    accumulated_channels,
+                ) = self._accumulate_batch_result(
+                    accumulated_result,
+                    counters=(
+                        total_rows,
+                        total_channels,
+                        accumulated_rows,
+                        accumulated_channels,
+                    ),
+                    statistic_ids=accumulated_statistic_ids,
+                )
                 self._merge_import_points(
                     accumulated_import_points_by_nmi,
                     accumulated_result.import_points_by_nmi or {},
@@ -224,11 +254,21 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
                 pair["accumulated_points"],
                 pair["interval_points"],
             )
-            total_rows += combined_result.rows_imported
-            total_channels += combined_result.channels_imported
-            combined_rows += combined_result.rows_imported
-            combined_channels += combined_result.channels_imported
-            combined_statistic_ids.extend(combined_result.statistic_ids)
+            (
+                total_rows,
+                total_channels,
+                combined_rows,
+                combined_channels,
+            ) = self._accumulate_batch_result(
+                combined_result,
+                counters=(
+                    total_rows,
+                    total_channels,
+                    combined_rows,
+                    combined_channels,
+                ),
+                statistic_ids=combined_statistic_ids,
+            )
 
         paired_interval_nmis = {str(pair["combined_nmi"]) for pair in selected_pairs}
         for nmi, interval_points in interval_import_points_by_nmi.items():
@@ -238,11 +278,21 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
                 nmi,
                 tuple(interval_points),
             )
-            total_rows += combined_result.rows_imported
-            total_channels += combined_result.channels_imported
-            combined_rows += combined_result.rows_imported
-            combined_channels += combined_result.channels_imported
-            combined_statistic_ids.extend(combined_result.statistic_ids)
+            (
+                total_rows,
+                total_channels,
+                combined_rows,
+                combined_channels,
+            ) = self._accumulate_batch_result(
+                combined_result,
+                counters=(
+                    total_rows,
+                    total_channels,
+                    combined_rows,
+                    combined_channels,
+                ),
+                statistic_ids=combined_statistic_ids,
+            )
 
         return SyncImportStats(
             rows_imported=total_rows,
@@ -260,6 +310,22 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
         )
 
     @staticmethod
+    def _accumulate_batch_result(
+        result: ImportBatchResult,
+        counters: tuple[int, int, int, int],
+        statistic_ids: list[str],
+    ) -> tuple[int, int, int, int]:
+        """Accumulate counters and ids from one sync batch result."""
+        total_rows, total_channels, category_rows, category_channels = counters
+        statistic_ids.extend(result.statistic_ids)
+        return (
+            total_rows + result.rows_imported,
+            total_channels + result.channels_imported,
+            category_rows + result.rows_imported,
+            category_channels + result.channels_imported,
+        )
+
+    @staticmethod
     def _merge_import_points(
         target: dict[str, list[tuple[datetime, float]]],
         source: dict[str, tuple[tuple[datetime, float], ...]],
@@ -273,7 +339,7 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
     def _select_consecutive_stream_pairs(
         accumulated_by_nmi: dict[str, list[tuple[datetime, float]]],
         interval_by_nmi: dict[str, list[tuple[datetime, float]]],
-    ) -> list[dict[str, str | tuple[tuple[datetime, float], ...]]]:
+    ) -> list[CombinedStreamPair]:
         """Match accumulated and interval streams that form one timeline."""
         candidates: list[tuple[int, float, str, str]] = []
         for accumulated_nmi, accumulated_points in accumulated_by_nmi.items():
@@ -302,7 +368,7 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
                     )
                 )
 
-        pairs: list[dict[str, str | tuple[tuple[datetime, float], ...]]] = []
+        pairs: list[CombinedStreamPair] = []
         used_accumulated_nmis: set[str] = set()
         used_interval_nmis: set[str] = set()
         for _rank, _gap_seconds, accumulated_nmi, interval_nmi in sorted(candidates):
@@ -340,7 +406,6 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
         total_rows = 0
         total_channels = 0
         statistic_ids: list[str] = []
-        latest_interval_data_point: datetime | None = None
         import_hourly_totals_by_nmi: dict[str, dict[datetime, float]] = defaultdict(
             lambda: defaultdict(float)
         )
