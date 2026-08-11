@@ -446,11 +446,22 @@ class SAPowerNetworksApiClient:
         data: list[Any] | None,
     ) -> list[dict[str, Any]]:
         """Resolve method context and invoke one remoting call."""
-        await self._ensure_authenticated()
-        ctx = await self.resolve_method(path=path, method_name=method_name)
-        return await self.invoke_rpc(
-            path=path, method_name=method_name, ctx=ctx, data=data
-        )
+        for force_login in (False, True):
+            await self._ensure_authenticated(force=force_login)
+            try:
+                ctx = await self.resolve_method(path=path, method_name=method_name)
+                return await self.invoke_rpc(
+                    path=path, method_name=method_name, ctx=ctx, data=data
+                )
+            except (
+                SAPowerNetworksApiClientAuthenticationError,
+                SAPowerNetworksApiClientParseError,
+            ):
+                if force_login:
+                    raise
+
+        msg = "Unable to invoke remoting method"
+        raise SAPowerNetworksApiClientAuthenticationError(msg)
 
     async def resolve_method(self, path: str, method_name: str) -> SalesforceMethod:
         """Resolve method metadata from Visualforce data keys."""
@@ -470,7 +481,7 @@ class SAPowerNetworksApiClient:
         vf_json = self._extract_vf_json(text)
         if not vf_json:
             msg = "No remoting data keys found"
-            raise SAPowerNetworksApiClientAuthenticationError(msg)
+            raise SAPowerNetworksApiClientParseError(msg)
         return vf_json
 
     async def invoke_rpc(

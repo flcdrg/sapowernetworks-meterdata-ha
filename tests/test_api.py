@@ -12,6 +12,7 @@ from custom_components.sapowernetworks.api import (
     SAPowerNetworksApiClient,
     SAPowerNetworksApiClientAuthenticationError,
     SAPowerNetworksApiClientCommunicationError,
+    SAPowerNetworksApiClientParseError,
     _is_summary_csv_payload,
     _merge_csv_chunks,
     _merge_nem12_chunks,
@@ -513,3 +514,73 @@ async def test_ensure_authenticated_logs_in_when_session_not_authenticated(
 
     assert calls == {"probe": 1, "login": 1}
     assert client._is_authenticated is True
+
+
+@pytest.mark.asyncio
+async def test_data_from_method_retries_after_parse_failure(monkeypatch) -> None:
+    """Remoting call should retry once with forced login after parse-level miss."""
+    fake_secret = "synthetic-test-value"
+    client = SAPowerNetworksApiClient(
+        username="user@example.com",
+        password=fake_secret,
+        session=None,  # type: ignore[arg-type]
+    )
+    ensure_calls: list[bool] = []
+    resolve_calls = 0
+
+    async def _fake_ensure_authenticated(*, force: bool = False) -> None:
+        ensure_calls.append(force)
+
+    async def _fake_resolve_method(*_args: Any, **_kwargs: Any) -> Any:
+        nonlocal resolve_calls
+        resolve_calls += 1
+        if resolve_calls == 1:
+            msg = "No remoting data keys found"
+            raise SAPowerNetworksApiClientParseError(msg)
+        return object()
+
+    async def _fake_invoke_rpc(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        return [{"result": []}]
+
+    monkeypatch.setattr(client, "_ensure_authenticated", _fake_ensure_authenticated)
+    monkeypatch.setattr(client, "resolve_method", _fake_resolve_method)
+    monkeypatch.setattr(client, "invoke_rpc", _fake_invoke_rpc)
+
+    payload = await client._data_from_method(
+        path="apex/cadenergydashboard",
+        method_name="getNmiAssignments",
+        data=None,
+    )
+
+    assert payload == [{"result": []}]
+    assert ensure_calls == [False, True]
+
+
+@pytest.mark.asyncio
+async def test_data_from_method_raises_after_forced_retry_failure(
+    monkeypatch,
+) -> None:
+    """Remoting call should surface parse errors if forced retry still fails."""
+    fake_secret = "synthetic-test-value"
+    client = SAPowerNetworksApiClient(
+        username="user@example.com",
+        password=fake_secret,
+        session=None,  # type: ignore[arg-type]
+    )
+
+    async def _fake_ensure_authenticated(*, force: bool = False) -> None:
+        _ = force
+
+    async def _always_fail_resolve(*_args: Any, **_kwargs: Any) -> Any:
+        msg = "No remoting data keys found"
+        raise SAPowerNetworksApiClientParseError(msg)
+
+    monkeypatch.setattr(client, "_ensure_authenticated", _fake_ensure_authenticated)
+    monkeypatch.setattr(client, "resolve_method", _always_fail_resolve)
+
+    with pytest.raises(SAPowerNetworksApiClientParseError):
+        await client._data_from_method(
+            path="apex/cadenergydashboard",
+            method_name="getNmiAssignments",
+            data=None,
+        )
