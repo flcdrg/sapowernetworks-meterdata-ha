@@ -329,8 +329,11 @@ class SAPowerNetworksApiClient:
         if self._is_authenticated and not force:
             return
         if not force and await self._session_appears_authenticated():
+            self._debug("Reusing existing authenticated portal session", {})
             self._is_authenticated = True
             return
+        if force:
+            self._debug("Forcing portal re-authentication before remoting retry", {})
         await self._perform_login()
         self._is_authenticated = True
 
@@ -446,11 +449,31 @@ class SAPowerNetworksApiClient:
         data: list[Any] | None,
     ) -> list[dict[str, Any]]:
         """Resolve method context and invoke one remoting call."""
-        await self._ensure_authenticated()
-        ctx = await self.resolve_method(path=path, method_name=method_name)
-        return await self.invoke_rpc(
-            path=path, method_name=method_name, ctx=ctx, data=data
-        )
+        for force_login in (False, True):
+            await self._ensure_authenticated(force=force_login)
+            try:
+                ctx = await self.resolve_method(path=path, method_name=method_name)
+                return await self.invoke_rpc(
+                    path=path, method_name=method_name, ctx=ctx, data=data
+                )
+            except (
+                SAPowerNetworksApiClientAuthenticationError,
+                SAPowerNetworksApiClientParseError,
+            ) as exception:
+                self._debug(
+                    "Remoting call failed before RPC invoke",
+                    {
+                        "method": method_name,
+                        "path": path,
+                        "force_login": force_login,
+                        "error": str(exception),
+                    },
+                )
+                if force_login:
+                    raise
+
+        msg = "Unable to invoke remoting method"
+        raise SAPowerNetworksApiClientAuthenticationError(msg)
 
     async def resolve_method(self, path: str, method_name: str) -> SalesforceMethod:
         """Resolve method metadata from Visualforce data keys."""
@@ -469,8 +492,15 @@ class SAPowerNetworksApiClient:
 
         vf_json = self._extract_vf_json(text)
         if not vf_json:
+            self._debug(
+                "Remoting data keys missing in page content",
+                {
+                    "path": path,
+                    "response_snippet": text.strip()[:250],
+                },
+            )
             msg = "No remoting data keys found"
-            raise SAPowerNetworksApiClientAuthenticationError(msg)
+            raise SAPowerNetworksApiClientParseError(msg)
         return vf_json
 
     async def invoke_rpc(
