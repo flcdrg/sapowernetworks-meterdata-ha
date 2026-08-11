@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING
 
 from homeassistant.components.button import ButtonEntity, ButtonEntityDescription
 
+from .const import LOGGER
 from .entity import SAPowerNetworksEntity
 
 if TYPE_CHECKING:
@@ -59,11 +61,26 @@ class SAPowerNetworksButton(SAPowerNetworksEntity, ButtonEntity):
 
     async def async_press(self) -> None:
         """Trigger an immediate coordinator refresh."""
+        started = time.monotonic()
         self._is_refreshing = True
+        LOGGER.info("Manual refresh requested from integration button")
         if self.hass is not None:
             self.async_write_ha_state()
         try:
             await self.coordinator.async_request_refresh()
+            duration_seconds = time.monotonic() - started
+            LOGGER.info(
+                "Manual refresh completed in %.2fs (success=%s)",
+                duration_seconds,
+                self.coordinator.last_update_success,
+            )
+        except Exception:
+            duration_seconds = time.monotonic() - started
+            LOGGER.exception(
+                "Manual refresh failed after %.2fs",
+                duration_seconds,
+            )
+            raise
         finally:
             self._is_refreshing = False
             if self.hass is not None:

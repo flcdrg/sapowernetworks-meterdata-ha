@@ -329,8 +329,11 @@ class SAPowerNetworksApiClient:
         if self._is_authenticated and not force:
             return
         if not force and await self._session_appears_authenticated():
+            self._debug("Reusing existing authenticated portal session", {})
             self._is_authenticated = True
             return
+        if force:
+            self._debug("Forcing portal re-authentication before remoting retry", {})
         await self._perform_login()
         self._is_authenticated = True
 
@@ -456,7 +459,16 @@ class SAPowerNetworksApiClient:
             except (
                 SAPowerNetworksApiClientAuthenticationError,
                 SAPowerNetworksApiClientParseError,
-            ):
+            ) as exception:
+                self._debug(
+                    "Remoting call failed before RPC invoke",
+                    {
+                        "method": method_name,
+                        "path": path,
+                        "force_login": force_login,
+                        "error": str(exception),
+                    },
+                )
                 if force_login:
                     raise
 
@@ -480,6 +492,13 @@ class SAPowerNetworksApiClient:
 
         vf_json = self._extract_vf_json(text)
         if not vf_json:
+            self._debug(
+                "Remoting data keys missing in page content",
+                {
+                    "path": path,
+                    "response_snippet": text.strip()[:250],
+                },
+            )
             msg = "No remoting data keys found"
             raise SAPowerNetworksApiClientParseError(msg)
         return vf_json

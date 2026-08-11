@@ -113,7 +113,11 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
     async def _async_update_data(self) -> Any:
         """Update data via library."""
         try:
+            LOGGER.debug("Coordinator refresh started")
             assignments = await self.client.get_nmi_assignments()
+            LOGGER.debug(
+                "Fetched NMI assignments", extra={"nmi_count": len(assignments)}
+            )
             import_stats = await self._async_sync_statistics(assignments)
             feed_lag_hours: float | None = None
             if import_stats.latest_interval_data_point is not None:
@@ -121,6 +125,17 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
                     datetime.now(tz=UTC) - import_stats.latest_interval_data_point
                 ).total_seconds()
                 feed_lag_hours = round(max(lag_seconds, 0.0) / 3600.0, 2)
+
+            LOGGER.info(
+                "Refresh completed: rows=%s channels=%s interval_rows=%s "
+                "accumulated_rows=%s combined_rows=%s lag_hours=%s",
+                import_stats.rows_imported,
+                import_stats.channels_imported,
+                import_stats.interval_rows_imported,
+                import_stats.accumulated_rows_imported,
+                import_stats.combined_rows_imported,
+                feed_lag_hours,
+            )
 
             return {
                 "authenticated": True,
@@ -174,12 +189,19 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
         fetch_end = datetime.now(tz=UTC)
 
         for assignment in assignments:
+            masked_nmi = mask_identifier(assignment.nmi)
             interval_result = ImportBatchResult(import_points_by_nmi={})
             interval_fetch_start = await self._async_fetch_start(
                 assignment.nmi,
                 existing_statistic_ids,
             )
             if interval_fetch_start < fetch_end:
+                LOGGER.debug(
+                    "Interval sync window for %s: %s to %s",
+                    masked_nmi,
+                    interval_fetch_start.isoformat(),
+                    fetch_end.isoformat(),
+                )
                 interval_result = await self._async_sync_interval_statistics(
                     assignment,
                     interval_fetch_start,
@@ -212,6 +234,12 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
                     interval_import_points_by_nmi,
                     interval_result.import_points_by_nmi or {},
                 )
+                LOGGER.debug(
+                    "Interval sync result for %s: rows=%s channels=%s",
+                    masked_nmi,
+                    interval_result.rows_imported,
+                    interval_result.channels_imported,
+                )
 
             accumulated_result = ImportBatchResult(import_points_by_nmi={})
             summary_fetch_start = await self._async_accumulated_fetch_start(
@@ -219,6 +247,12 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
                 existing_statistic_ids,
             )
             if summary_fetch_start < fetch_end:
+                LOGGER.debug(
+                    "Accumulated sync window for %s: %s to %s",
+                    masked_nmi,
+                    summary_fetch_start.isoformat(),
+                    fetch_end.isoformat(),
+                )
                 accumulated_result = await self._async_sync_accumulated_statistics(
                     assignment,
                     summary_fetch_start,
@@ -242,6 +276,12 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
                 self._merge_import_points(
                     accumulated_import_points_by_nmi,
                     accumulated_result.import_points_by_nmi or {},
+                )
+                LOGGER.debug(
+                    "Accumulated sync result for %s: rows=%s channels=%s",
+                    masked_nmi,
+                    accumulated_result.rows_imported,
+                    accumulated_result.channels_imported,
                 )
 
         selected_pairs = self._select_consecutive_stream_pairs(
@@ -269,6 +309,12 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
                 ),
                 statistic_ids=combined_statistic_ids,
             )
+            LOGGER.debug(
+                "Combined sync result for %s: rows=%s channels=%s",
+                mask_identifier(pair["combined_nmi"]),
+                combined_result.rows_imported,
+                combined_result.channels_imported,
+            )
 
         paired_interval_nmis = {str(pair["combined_nmi"]) for pair in selected_pairs}
         for nmi, interval_points in interval_import_points_by_nmi.items():
@@ -292,6 +338,12 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
                     combined_channels,
                 ),
                 statistic_ids=combined_statistic_ids,
+            )
+            LOGGER.debug(
+                "Interval-only combined continuation for %s: rows=%s channels=%s",
+                mask_identifier(nmi),
+                combined_result.rows_imported,
+                combined_result.channels_imported,
             )
 
         return SyncImportStats(
