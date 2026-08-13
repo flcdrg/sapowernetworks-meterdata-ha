@@ -35,6 +35,11 @@ async def test_setup_registers_refresh_service(
         AsyncMock(),
     )
     monkeypatch.setattr(
+        hass.config_entries,
+        "async_unload_platforms",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
         "custom_components.sapowernetworks.SAPowerNetworksDataUpdateCoordinator.async_request_refresh",
         refresh_mock,
     )
@@ -50,6 +55,9 @@ async def test_setup_registers_refresh_service(
     await hass.services.async_call(DOMAIN, SERVICE_REFRESH, blocking=True)
 
     refresh_mock.assert_awaited_once()
+
+    unload_result = await async_unload_entry(hass, mock_config_entry)
+    assert unload_result is True
 
 
 async def test_unload_removes_refresh_service_when_last_entry_unloaded(

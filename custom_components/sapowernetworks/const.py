@@ -1,6 +1,6 @@
 """Constants for SA Power Networks."""
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from logging import Logger, getLogger
 
 LOGGER: Logger = getLogger(__package__)
@@ -8,10 +8,12 @@ LOGGER: Logger = getLogger(__package__)
 DOMAIN = "sapowernetworks"
 ATTRIBUTION = "Data provided by SA Power Networks"
 
-DEFAULT_SCAN_INTERVAL = timedelta(hours=24)
 INITIAL_BACKFILL_START = datetime(2000, 1, 1, tzinfo=UTC)
 DETAILED_REPORT_MAX_RANGE = timedelta(days=90)
 ACCUMULATED_REPORT_MAX_RANGE = timedelta(days=730)
+
+LOCAL_REFRESH_TIME = time(hour=0, minute=30)
+UTC_REFRESH_TIME = time(hour=10, minute=0)
 
 PORTAL_BASE_URL = "https://customer.portal.sapowernetworks.com.au"
 CAD_SITE_LOGIN_PATH = "/meterdata/CADSiteLogin"

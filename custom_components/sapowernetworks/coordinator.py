@@ -21,6 +21,10 @@ from homeassistant.components.recorder.statistics import (
 )
 from homeassistant.const import UnitOfEnergy
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers.event import (
+    async_track_time_change,
+    async_track_utc_time_change,
+)
 from homeassistant.helpers.recorder import get_instance
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util.unit_conversion import EnergyConverter
@@ -32,11 +36,12 @@ from .api import (
     SAPowerNetworksApiClientError,
 )
 from .const import (
-    DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     INITIAL_BACKFILL_START,
+    LOCAL_REFRESH_TIME,
     LOGGER,
     STATISTIC_NAME_PREFIX,
+    UTC_REFRESH_TIME,
 )
 from .parsing import (
     IntervalReading,
@@ -47,6 +52,8 @@ from .parsing import (
 from .privacy import mask_identifier
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from homeassistant.core import HomeAssistant
 
     from .data import SAPowerNetworksConfigEntry
@@ -105,10 +112,51 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
             hass=hass,
             logger=LOGGER,
             name=DOMAIN,
-            update_interval=DEFAULT_SCAN_INTERVAL,
+            update_interval=None,
         )
         self.config_entry = config_entry
         self.client = client
+        self._scheduled_refresh_unsubscribers: list[Callable[[], None]] = []
+
+    def async_setup_scheduled_refreshes(self) -> None:
+        """Schedule automatic refreshes at fixed local and UTC times."""
+        if self._scheduled_refresh_unsubscribers:
+            return
+
+        self._scheduled_refresh_unsubscribers.append(
+            async_track_time_change(
+                self.hass,
+                self._async_handle_scheduled_refresh,
+                hour=LOCAL_REFRESH_TIME.hour,
+                minute=LOCAL_REFRESH_TIME.minute,
+                second=0,
+            )
+        )
+        self._scheduled_refresh_unsubscribers.append(
+            async_track_utc_time_change(
+                self.hass,
+                self._async_handle_scheduled_refresh,
+                hour=UTC_REFRESH_TIME.hour,
+                minute=UTC_REFRESH_TIME.minute,
+                second=0,
+            )
+        )
+        LOGGER.debug(
+            "Scheduled refresh triggers configured for local %s and UTC %s",
+            LOCAL_REFRESH_TIME.isoformat(timespec="minutes"),
+            UTC_REFRESH_TIME.isoformat(timespec="minutes"),
+        )
+
+    def async_unload(self) -> None:
+        """Unsubscribe automatic refresh callbacks."""
+        while self._scheduled_refresh_unsubscribers:
+            unsubscribe = self._scheduled_refresh_unsubscribers.pop()
+            unsubscribe()
+
+    async def _async_handle_scheduled_refresh(self, now: datetime) -> None:
+        """Run one scheduled refresh."""
+        LOGGER.debug("Running scheduled refresh at %s", now.isoformat())
+        await self.async_request_refresh()
 
     async def _async_update_data(self) -> Any:
         """Update data via library."""
