@@ -70,6 +70,7 @@ async def async_setup_entry(
         )
 
     await coordinator.async_config_entry_first_refresh()
+    coordinator.async_setup_scheduled_refreshes()
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
@@ -88,7 +89,9 @@ async def async_unload_entry(
         DATA_COORDINATORS,
         {},
     )
-    coordinators.pop(entry.entry_id, None)
+    coordinator = coordinators.pop(entry.entry_id, None)
+    if coordinator is not None:
+        coordinator.async_unload()
 
     if not coordinators:
         hass.services.async_remove(DOMAIN, SERVICE_REFRESH)

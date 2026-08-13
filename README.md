@@ -22,14 +22,19 @@ After setup, the integration creates:
 
 - One device named SA Power Networks
 - Status sensors:
-  - Authentication Status
-  - NMI Count
-  - Rows Imported
-  - Interval Rows Imported
-  - Accumulated Periods Imported
-  - Channels Imported
-  - Last Error
-  - Last Successful Sync
+
+  | Name                         | Description                                                                                          |
+  | ---------------------------- | ---------------------------------------------------------------------------------------------------- |
+  | Authentication Status        | Whether portal authentication is currently valid for data sync operations.                           |
+  | NMI Count                    | Number of NMIs (meter identifiers) discovered for the configured account.                            |
+  | Rows Imported                | Total number of data rows imported into Recorder across interval, accumulated, and combined streams. |
+  | Interval Rows Imported       | Number of interval (detailed) rows imported into Recorder statistics.                                |
+  | Accumulated Periods Imported | Number of accumulated summary periods imported into Recorder statistics.                             |
+  | Channels Imported            | Number of unique statistic channels/streams imported.                                                |
+  | Feed Lag                     | Estimated lag, in hours, between current time and the latest imported reading.                       |
+  | Last Error                   | Most recent sync or processing error message, if any.                                                |
+  | Last Successful Sync         | Timestamp of the most recent successful import/sync cycle.                                           |
+
 - One button entity:
   - Refresh Meter Data
 - One service:
@@ -39,14 +44,37 @@ Important: this integration currently imports statistics to Recorder and does no
 
 ## How Data Is Imported
 
-- Update cadence: every 24 hours by default
+- Update cadence: twice daily by default (around 00:30 local Home Assistant time and 10:00 UTC)
 - Manual refresh: use the Refresh Meter Data button or call sapowernetworks.refresh
 - Historical backfill: starts from 2000-01-01 for first import
-- Detailed interval data is imported as hourly statistics in Recorder
-- Accumulated summary data is imported as period-based statistics
-- A combined import stream may be created when accumulated and interval streams are consecutive
+- Data stream meanings:
+
+  | Stream      | Typical meter type                                                | Meaning                                                                                                                                                                                           |
+  | ----------- | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  | Interval    | Smart meter (interval-capable)                                    | Detailed NEM12 interval readings (for example, 5/15/30-minute source intervals) grouped into hourly Recorder statistics per channel.                                                              |
+  | Accumulated | Non-smart/accumulation meter (or summary-only feed)               | Summary CSV period totals imported as period-based statistics (one point per summary period end date) for accumulated import/export channels.                                                     |
+  | Combined    | Handover from accumulated history to interval smart-meter history | A single import timeline that stitches accumulated import points to interval import points when they are consecutive (interval starts at or after the accumulated end, with at most a 1-day gap). |
+
+- Combined stream notes:
+  - Combined is import-focused (Combined Import) and is used to give one continuous import history across stream handoff.
+  - If a combined stream already exists, new interval import points can continue that stream on later syncs.
 
 Statistic display names begin with SA Power Networks and include direction labels such as Import, Export, Accumulated Import, Accumulated Export, and Combined Import.
+
+Examples of what you might see:
+
+| Stream                    | Example display name in Home Assistant              | Example statistic_id pattern                    |
+| ------------------------- | --------------------------------------------------- | ----------------------------------------------- |
+| Interval (import channel) | SA Power Networks Import **\*\*\***5678 E1          | sapowernetworks:abc123def456_import_e1          |
+| Interval (export channel) | SA Power Networks Export **\*\*\***5678 B1          | sapowernetworks:abc123def456_export_b1          |
+| Accumulated (import)      | SA Power Networks Accumulated Import **\*\*\***5678 | sapowernetworks:abc123def456_accumulated_import |
+| Accumulated (export)      | SA Power Networks Accumulated Export **\*\*\***5678 | sapowernetworks:abc123def456_accumulated_export |
+| Combined                  | SA Power Networks Combined Import **\*\*\***5678    | sapowernetworks:abc123def456_combined_import    |
+
+Notes:
+
+- The masked number is the NMI with only the last 4 digits visible.
+- The 12-character segment in statistic_id (abc123def456 above) is a deterministic hash of the NMI, so your value will differ.
 
 ## Requirements
 
