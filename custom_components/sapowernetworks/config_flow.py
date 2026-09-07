@@ -86,3 +86,55 @@ class SAPowerNetworksConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             session=async_get_clientsession(self.hass),
         )
         await client.test_credentials()
+
+    async def async_step_reauth(
+        self,
+        entry_data: dict,
+    ) -> config_entries.ConfigFlowResult:
+        """Handle a reauthentication request."""
+        self._reauth_username = entry_data[CONF_USERNAME]
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self,
+        user_input: dict | None = None,
+    ) -> config_entries.ConfigFlowResult:
+        """Confirm updated credentials for an existing entry."""
+        errors = {}
+        if user_input is not None:
+            try:
+                await self._test_credentials(
+                    username=self._reauth_username,
+                    password=user_input[CONF_PASSWORD],
+                )
+            except SAPowerNetworksApiClientAuthenticationError as exception:
+                LOGGER.warning(exception)
+                errors["base"] = "auth"
+            except SAPowerNetworksApiClientParseError as exception:
+                LOGGER.warning(exception)
+                errors["base"] = "portal"
+            except SAPowerNetworksApiClientCommunicationError as exception:
+                LOGGER.error(exception)
+                errors["base"] = "connection"
+            except SAPowerNetworksApiClientError as exception:
+                LOGGER.exception(exception)
+                errors["base"] = "unknown"
+            else:
+                return self.async_update_reload_and_abort(
+                    self._get_reauth_entry(),
+                    data_updates={CONF_PASSWORD: user_input[CONF_PASSWORD]},
+                )
+
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_PASSWORD): selector.TextSelector(
+                        selector.TextSelectorConfig(
+                            type=selector.TextSelectorType.PASSWORD,
+                        ),
+                    ),
+                }
+            ),
+            errors=errors,
+        )

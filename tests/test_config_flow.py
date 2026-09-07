@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from homeassistant.config_entries import SOURCE_USER
+from homeassistant.config_entries import SOURCE_REAUTH, SOURCE_USER
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -132,3 +132,62 @@ async def test_user_flow_aborts_when_username_already_configured(
 
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "already_configured"
+
+
+async def test_reauth_flow_updates_password(
+    hass, mock_config_entry, monkeypatch
+) -> None:
+    """Reauthentication should store a validated replacement password."""
+    mock_config_entry.add_to_hass(hass)
+
+    async def _pass_credentials(self, username: str, password: str) -> None:
+        assert username == "user@example.com"
+        assert password == "updated-secret"
+
+    monkeypatch.setattr(
+        SAPowerNetworksConfigFlow, "_test_credentials", _pass_credentials
+    )
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": SOURCE_REAUTH, "entry_id": mock_config_entry.entry_id},
+        data=mock_config_entry.data,
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "reauth_confirm"
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {CONF_PASSWORD: "updated-secret"},
+    )
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reauth_successful"
+    assert mock_config_entry.data[CONF_PASSWORD] == "updated-secret"
+
+
+async def test_reauth_flow_maps_auth_error(
+    hass, mock_config_entry, monkeypatch
+) -> None:
+    """Reauthentication should report rejected replacement credentials."""
+    mock_config_entry.add_to_hass(hass)
+
+    async def _fail_auth(self, username: str, password: str) -> None:
+        msg = "bad credentials"
+        raise SAPowerNetworksApiClientAuthenticationError(msg)
+
+    monkeypatch.setattr(SAPowerNetworksConfigFlow, "_test_credentials", _fail_auth)
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": SOURCE_REAUTH, "entry_id": mock_config_entry.entry_id},
+        data=mock_config_entry.data,
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {CONF_PASSWORD: "invalid-secret"},
+    )
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "reauth_confirm"
+    assert result["errors"] == {"base": "auth"}
