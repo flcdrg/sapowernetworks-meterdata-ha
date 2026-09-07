@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+
+set -e
+
+cd "$(dirname "$0")/.."
+
+ha_version="$(python - <<'PY'
+import json
+from pathlib import Path
+
+print(json.loads(Path("hacs.json").read_text())["homeassistant"])
+PY
+)"
+
+uv run --with "homeassistant==${ha_version}" pytest -q
