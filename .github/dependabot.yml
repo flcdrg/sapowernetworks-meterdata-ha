@@ -55,3 +55,5 @@ updates:
       # Keep Home Assistant version policy controlled by this repository.
       # Supported minimum HA is defined in hacs.json.
       - dependency-name: "homeassistant"
+      # Keep the test plugin compatible with the minimum supported HA version.
+      - dependency-name: "pytest-homeassistant-custom-component"
