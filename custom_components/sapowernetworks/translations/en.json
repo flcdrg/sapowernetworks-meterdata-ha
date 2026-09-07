@@ -7,6 +7,12 @@
                     "username": "Username",
                     "password": "Password"
                 }
+            },
+            "reauth_confirm": {
+                "description": "Your SA Power Networks credentials need to be updated. If your password has expired, change it in the SA Power Networks customer portal, then enter the new password here.",
+                "data": {
+                    "password": "Password"
+                }
             }
         },
         "error": {
