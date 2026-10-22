@@ -202,10 +202,10 @@ If login fails, check Home Assistant logs for:
 
 ### Last Error has content
 
-The Last Error sensor stays available after a failed refresh and clears after a
-successful refresh. Open Home Assistant logs and diagnostics for the config entry
-for more detail. Diagnostics redact sensitive fields such as credentials and
-account identifiers.
+The Last Error sensor redacts sensitive message content, stays available after a
+failed refresh, and clears after a successful refresh. Open Home Assistant logs and
+diagnostics for the config entry for more detail. Diagnostics redact sensitive
+fields such as credentials and account identifiers.
 
 ## Privacy And Diagnostics
 

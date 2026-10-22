@@ -86,6 +86,22 @@ async def async_setup_entry(
     )
 
 
+def _sanitize_error(message: str) -> str:
+    """
+    Expose only a fixed status, never arbitrary portal response text.
+
+    Regression cases for secrets not covered by the shared redactor:
+
+    >>> _sanitize_error("Portal response: token=secret-value")
+    'Error reported'
+    >>> _sanitize_error('{"access_token": "secret-value"}')
+    'Error reported'
+    >>> _sanitize_error("")
+    ''
+    """
+    return "Error reported" if message else ""
+
+
 class SAPowerNetworksSensor(SAPowerNetworksEntity, SensorEntity):
     """SA Power Networks sensor entity."""
 
@@ -127,12 +143,14 @@ class SAPowerNetworksSensor(SAPowerNetworksEntity, SensorEntity):
             and self.coordinator.last_exception is not None
         ):
             exception = self.coordinator.last_exception
-            return str(exception) or type(exception).__name__
+            return "Update failed" if str(exception) else type(exception).__name__
 
         data = self.coordinator.data
         if not isinstance(data, dict):
             return None
         value = data.get(self.entity_description.key)
+        if self.entity_description.key == "last_error" and isinstance(value, str):
+            return _sanitize_error(value)
         if isinstance(value, (datetime, str, int, float, bool)):
             return value
         return None

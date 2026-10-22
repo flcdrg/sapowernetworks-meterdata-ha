@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import pytest
 from homeassistant.helpers import entity_registry as er
 
 from custom_components.sapowernetworks.api import (
@@ -103,14 +104,26 @@ def test_last_sync_sensor_returns_datetime_value(mock_config_entry) -> None:
     assert sensor.extra_state_attributes is None
 
 
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("portal timeout", "Error reported"),
+        (
+            "Portal error for user@example.com NMI 20012345678 csrf=synthetic-token",
+            "Error reported",
+        ),
+    ],
+)
 def test_last_error_sensor_returns_string_without_extra_attributes(
     mock_config_entry,
+    message: str,
+    expected: str,
 ) -> None:
-    """Last Error sensor should expose its string state without debug attributes."""
+    """Last Error should redact its data value without exposing debug attributes."""
     coordinator = _build_coordinator(
         mock_config_entry,
         {
-            "last_error": "portal timeout",
+            "last_error": message,
         },
     )
     entity_description = next(
@@ -121,16 +134,29 @@ def test_last_error_sensor_returns_string_without_extra_attributes(
 
     sensor = SAPowerNetworksSensor(coordinator, entity_description)
 
-    assert sensor.native_value == "portal timeout"
+    assert sensor.native_value == expected
     assert sensor.extra_state_attributes is None
 
 
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("portal timeout", "Update failed"),
+        (
+            "Portal error for user@example.com NMI 20012345678 csrf=synthetic-token",
+            "Update failed",
+        ),
+        ("", "RuntimeError"),
+    ],
+)
 def test_last_error_sensor_reports_failure_and_clears_after_recovery(
     mock_config_entry,
+    message: str,
+    expected: str,
 ) -> None:
     """Last Error should stay available through failures and clear after recovery."""
     coordinator = _build_coordinator(mock_config_entry, {"last_error": ""})
-    coordinator.last_exception = RuntimeError("portal timeout")
+    coordinator.last_exception = RuntimeError(message)
     coordinator.last_update_success = False
     entity_description = next(
         description
@@ -141,7 +167,7 @@ def test_last_error_sensor_reports_failure_and_clears_after_recovery(
     sensor = SAPowerNetworksSensor(coordinator, entity_description)
 
     assert sensor.available is True
-    assert sensor.native_value == "portal timeout"
+    assert sensor.native_value == expected
 
     coordinator.last_update_success = True
 
@@ -179,12 +205,12 @@ async def test_last_error_entity_remains_available_during_failed_refresh(
     assert hass.states.get(entity_id).state == ""
 
     client.get_nmi_assignments.side_effect = SAPowerNetworksApiClientCommunicationError(
-        "portal timeout"
+        "Portal error for user@example.com NMI 20012345678 csrf=synthetic-token"
     )
     await mock_config_entry.runtime_data.async_refresh()
     await hass.async_block_till_done()
 
-    assert hass.states.get(entity_id).state == "portal timeout"
+    assert hass.states.get(entity_id).state == "Update failed"
 
     client.get_nmi_assignments.side_effect = None
     client.get_nmi_assignments.return_value = []
