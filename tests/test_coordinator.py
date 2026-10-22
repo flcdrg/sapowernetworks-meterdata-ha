@@ -609,7 +609,7 @@ async def test_coordinator_imports_combined_when_streams_are_consecutive(
     client.get_nmi_assignments.return_value = [assignment]
     client.download_detailed_csv.return_value = _sample_detailed_csv_for_nmi_on_day(
         assignment.nmi,
-        "20250318",
+        "20250319",
     )
     client.download_accumulated_summary_csv.return_value = _sample_summary_csv_for_nmi(
         assignment.nmi
@@ -649,7 +649,7 @@ async def test_coordinator_imports_combined_when_streams_are_consecutive(
 
     result = await coordinator._async_update_data()
 
-    assert result["combined_rows_imported"] == 2
+    assert result["combined_rows_imported"] == 3
     assert result["combined_channels_imported"] == 1
     assert len(result["combined_statistic_ids"]) == 1
 
@@ -660,9 +660,10 @@ async def test_coordinator_imports_combined_when_streams_are_consecutive(
             combined_rows = statistics
             break
 
-    assert len(combined_rows) == 2
+    assert len(combined_rows) == 3
     assert combined_rows[0]["sum"] == 837.0
-    assert combined_rows[1]["sum"] == 839.5
+    assert combined_rows[1]["sum"] == 1857.0
+    assert combined_rows[2]["sum"] == 1859.5
 
 
 async def test_coordinator_imports_combined_across_consecutive_nmis(
@@ -694,7 +695,7 @@ async def test_coordinator_imports_combined_across_consecutive_nmis(
         _end: datetime,
     ) -> str:
         if nmi == new_assignment.nmi:
-            return _sample_detailed_csv_for_nmi_on_day(new_assignment.nmi, "20250318")
+            return _sample_detailed_csv_for_nmi_on_day(new_assignment.nmi, "20250319")
         return ""
 
     async def _fake_download_accumulated_summary_csv(
@@ -745,7 +746,7 @@ async def test_coordinator_imports_combined_across_consecutive_nmis(
 
     result = await coordinator._async_update_data()
 
-    assert result["combined_rows_imported"] == 2
+    assert result["combined_rows_imported"] == 3
     assert result["combined_channels_imported"] == 1
     assert len(result["combined_statistic_ids"]) == 1
 
@@ -758,9 +759,10 @@ async def test_coordinator_imports_combined_across_consecutive_nmis(
             combined_rows = statistics
             break
 
-    assert len(combined_rows) == 2
+    assert len(combined_rows) == 3
     assert combined_rows[0]["sum"] == 837.0
-    assert combined_rows[1]["sum"] == 839.5
+    assert combined_rows[1]["sum"] == 1857.0
+    assert combined_rows[2]["sum"] == 1859.5
 
 
 async def test_coordinator_continues_combined_from_interval_when_gap_grows(
@@ -801,7 +803,7 @@ async def test_coordinator_continues_combined_from_interval_when_gap_grows(
     ) -> None:
         imported.append((metadata, list(statistics)))
 
-    combined_last = datetime(2026, 8, 8, 23, 0, tzinfo=UTC)
+    combined_last = datetime(2026, 8, 8, 13, 0, tzinfo=UTC)
 
     def _fake_get_last_statistics(*_args: Any, **kwargs: Any) -> dict[str, Any]:
         statistic_ids = kwargs.get("statistic_ids")
