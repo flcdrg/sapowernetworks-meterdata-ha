@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
-from typing import Any, Never
+from typing import Any, Never, Self
 
 import pytest
 
@@ -503,6 +503,112 @@ async def test_download_accumulated_summary_chunks_form_fallback(
     assert calls[0] == (start, start + ACCUMULATED_REPORT_MAX_RANGE)
     assert calls[1] == (start + ACCUMULATED_REPORT_MAX_RANGE, end)
     assert result.count("20012345678") == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failed_request", "status", "expected_error"),
+    [
+        ("get", 503, SAPowerNetworksApiClientCommunicationError),
+        ("get", 403, SAPowerNetworksApiClientAuthenticationError),
+        ("post", 503, SAPowerNetworksApiClientCommunicationError),
+    ],
+)
+async def test_accumulated_summary_form_http_errors_are_reported(
+    monkeypatch,
+    failed_request: str,
+    status: int,
+    expected_error: type[Exception],
+) -> None:
+    """Summary form HTTP errors should not be mistaken for empty data."""
+    html = (
+        '<input type="hidden" '
+        'name="com.salesforce.visualforce.ViewState" value="view-state">'
+        '<input type="hidden" '
+        'name="com.salesforce.visualforce.ViewStateMAC" value="mac">'
+    )
+
+    class _FakeResponse:
+        def __init__(self, response_status: int, body: str) -> None:
+            self.status = response_status
+            self._body = body
+
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def text(self) -> str:
+            return self._body
+
+    class _FakeSession:
+        def __init__(self) -> None:
+            self.get_response = _FakeResponse(
+                status if failed_request == "get" else 200,
+                "" if failed_request == "get" else html,
+            )
+            self.post_response = _FakeResponse(
+                status if failed_request == "post" else 200,
+                "",
+            )
+
+        def get(self, *_args: Any, **_kwargs: Any) -> _FakeResponse:
+            return self.get_response
+
+        def post(self, *_args: Any, **_kwargs: Any) -> _FakeResponse:
+            return self.post_response
+
+    fake_secret = "synthetic-test-value"
+    client = SAPowerNetworksApiClient(
+        username="user@example.com",
+        password=fake_secret,
+        session=_FakeSession(),  # type: ignore[arg-type]
+    )
+
+    async def _no_auth_needed() -> None:
+        return None
+
+    monkeypatch.setattr(client, "_ensure_authenticated", _no_auth_needed)
+
+    with pytest.raises(expected_error, match=str(status)):
+        await client._download_accumulated_summary_csv_form(
+            "20012345678",
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 2, 1, tzinfo=UTC),
+        )
+
+
+@pytest.mark.asyncio
+async def test_accumulated_summary_form_rejects_unexpected_nonempty_payload(
+    monkeypatch,
+) -> None:
+    """Unexpected form responses should not be silently discarded as no data."""
+    fake_secret = "synthetic-test-value"
+    client = SAPowerNetworksApiClient(
+        username="user@example.com",
+        password=fake_secret,
+        session=None,  # type: ignore[arg-type]
+    )
+
+    async def _fake_form(*_args: Any, **_kwargs: Any) -> str:
+        return "<html>Unexpected portal response</html>"
+
+    monkeypatch.setattr(
+        client,
+        "_download_accumulated_summary_csv_form",
+        _fake_form,
+    )
+
+    with pytest.raises(
+        SAPowerNetworksApiClientParseError,
+        match="Unexpected accumulated summary response",
+    ):
+        await client._download_accumulated_summary_csv_form_chunked(
+            "20012345678",
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 2, 1, tzinfo=UTC),
+        )
 
 
 @pytest.mark.asyncio
