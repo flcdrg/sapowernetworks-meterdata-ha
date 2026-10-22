@@ -23,6 +23,7 @@ from custom_components.sapowernetworks.const import (
     ACCUMULATED_REPORT_MAX_RANGE,
     DETAILED_REPORT_MAX_RANGE,
 )
+from custom_components.sapowernetworks.parsing import parse_nem12_content
 
 
 def test_extract_redirect_link() -> None:
@@ -223,6 +224,50 @@ def test_merge_nem12_chunks_deduplicates_wrapper_records() -> None:
     assert "300,20260620,1.0,1.5,A" in merged
     assert "300,20260621,2.0,2.5,A" in merged
     assert merged.endswith("900")
+
+
+def test_merge_nem12_chunks_preserves_channel_context() -> None:
+    """Chunk merging should retain each channel and only deduplicate its own rows."""
+    nmi = "20012345678"
+
+    def _channel(suffix: str) -> str:
+        return f"200,{nmi},E1B1,{suffix},{suffix},,METER1,KWH,30,"
+
+    def _row(day: str, value: str) -> str:
+        values = ",".join([value] * 48)
+        return f"300,{day},{values},A"
+
+    chunk_one = "\n".join(
+        [
+            "100,NEM12,202506081149,SAPN,NEMMCO",
+            _channel("E1"),
+            _row("20260620", "1.0"),
+            _channel("B1"),
+            _row("20260620", "1.0"),
+            "900",
+        ]
+    )
+    chunk_two = "\n".join(
+        [
+            "100,NEM12,202506081149,SAPN,NEMMCO",
+            _channel("E1"),
+            _row("20260620", "1.0"),
+            _row("20260621", "1.5"),
+            _channel("B1"),
+            _row("20260620", "1.0"),
+            _row("20260621", "2.5"),
+            "900",
+        ]
+    )
+
+    parsed = parse_nem12_content(_merge_nem12_chunks([chunk_one, chunk_two]))
+
+    import_readings = parsed[(nmi, "E1")]
+    export_readings = parsed[(nmi, "B1")]
+    assert len(import_readings) == 96
+    assert len(export_readings) == 96
+    assert sum(reading.value_kwh or 0 for reading in import_readings) == 120.0
+    assert sum(reading.value_kwh or 0 for reading in export_readings) == 168.0
 
 
 def test_merge_csv_chunks_deduplicates_summary_rows() -> None:

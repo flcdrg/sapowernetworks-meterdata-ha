@@ -799,7 +799,8 @@ def _merge_nem12_chunks(chunks: list[str]) -> str:
     header: str | None = None
     footer: str | None = None
     body_lines: list[str] = []
-    seen_lines: set[str] = set()
+    current_channel: str | None = None
+    seen_interval_rows: set[tuple[str | None, str]] = set()
 
     for chunk in chunks:
         for raw_line in chunk.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
@@ -812,9 +813,19 @@ def _merge_nem12_chunks(chunks: list[str]) -> str:
             if line.startswith("900"):
                 footer = footer or line
                 continue
-            if line in seen_lines:
+
+            if line.startswith("200,"):
+                if line != current_channel:
+                    body_lines.append(line)
+                current_channel = line
                 continue
-            seen_lines.add(line)
+
+            if line.startswith("300,"):
+                row_key = (current_channel, line)
+                if row_key in seen_interval_rows:
+                    continue
+                seen_interval_rows.add(row_key)
+
             body_lines.append(line)
 
     merged: list[str] = []
