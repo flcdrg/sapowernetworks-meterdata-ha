@@ -53,13 +53,14 @@ Important: this integration currently imports statistics to Recorder and does no
 
   | Stream      | Typical meter type                                                | Meaning                                                                                                                                                                                           |
   | ----------- | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-  | Interval    | Smart meter (interval-capable)                                    | Detailed NEM12 interval readings (for example, 5/15/30-minute source intervals) grouped into hourly Recorder statistics per channel.                                                              |
+  | Interval    | Smart meter (interval-capable)                                    | Detailed NEM12 interval readings (for example, 5/15/30-minute source intervals) grouped into fully covered hourly Recorder statistics per channel.                                                  |
   | Accumulated | Non-smart/accumulation meter (or summary-only feed)               | Summary CSV period totals imported as period-based statistics (one point per summary period end date) for accumulated import/export channels.                                                     |
   | Combined    | Handover from accumulated history to interval smart-meter history | A single import timeline that stitches accumulated import points to interval import points when they are consecutive (interval starts at or after the accumulated end, with at most a 1-day gap). |
 
 - Combined stream notes:
   - Combined is import-focused (Combined Import) and is used to give one continuous import history across stream handoff.
   - If a combined stream already exists, new interval import points can continue that stream on later syncs.
+- Partial hours are deferred until a later sync rather than imported as hourly subtotals.
 
 Statistic display names begin with SA Power Networks and include direction labels such as Import, Export, Accumulated Import, Accumulated Export, and Combined Import.
 

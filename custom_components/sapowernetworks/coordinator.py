@@ -511,23 +511,17 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
             lambda: defaultdict(float)
         )
         for (nmi, suffix), readings in parsed.items():
+            hourly_totals = self._complete_hourly_totals(readings)
             if self._channel_direction(suffix) == "import":
-                for reading in sorted(readings, key=lambda item: item.interval_start):
-                    if reading.value_kwh is None:
-                        continue
-                    hour_start = reading.interval_start.replace(
-                        minute=0,
-                        second=0,
-                        microsecond=0,
-                    )
-                    import_hourly_totals_by_nmi[nmi][hour_start] += reading.value_kwh
+                for hour_start, hour_value in hourly_totals.items():
+                    import_hourly_totals_by_nmi[nmi][hour_start] += hour_value
 
             statistic_id = self._statistic_id(nmi, suffix)
             last_start_ts, last_sum = await self._async_last_statistic_snapshot(
                 statistic_id
             )
             statistics = self._build_statistics(
-                readings,
+                hourly_totals,
                 last_start_ts,
                 last_sum,
             )
@@ -864,24 +858,48 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
             last_start_ts = None
         return last_start_ts, float(record.get("sum") or 0.0)
 
+    @staticmethod
+    def _complete_hourly_totals(
+        readings: list[IntervalReading],
+    ) -> dict[datetime, float]:
+        """Aggregate only hours fully covered by valid interval readings."""
+        hourly_readings: dict[datetime, list[IntervalReading]] = defaultdict(list)
+        for reading in readings:
+            hour_start = reading.interval_start.replace(
+                minute=0,
+                second=0,
+                microsecond=0,
+            )
+            hourly_readings[hour_start].append(reading)
+
+        hourly_totals: dict[datetime, float] = {}
+        for hour_start, hour_readings in sorted(hourly_readings.items()):
+            hour_end = hour_start + timedelta(hours=1)
+            coverage_end = hour_start
+            hour_total = 0.0
+            for reading in sorted(hour_readings, key=lambda item: item.interval_start):
+                if (
+                    reading.value_kwh is None
+                    or reading.interval_start != coverage_end
+                    or reading.interval_end > hour_end
+                ):
+                    break
+                hour_total += reading.value_kwh
+                coverage_end = reading.interval_end
+
+            if coverage_end == hour_end:
+                hourly_totals[hour_start] = hour_total
+
+        return hourly_totals
+
     def _build_statistics(
         self,
-        readings: list[IntervalReading],
+        hourly_totals: dict[datetime, float],
         last_start_ts: float | None,
         running_sum: float,
     ) -> list[StatisticData]:
         """Build hourly recorder statistics, skipping data already present."""
         statistics: list[StatisticData] = []
-        hourly_totals: dict[datetime, float] = defaultdict(float)
-        for reading in sorted(readings, key=lambda item: item.interval_start):
-            if reading.value_kwh is None:
-                continue
-
-            hour_start = reading.interval_start.replace(
-                minute=0, second=0, microsecond=0
-            )
-            hourly_totals[hour_start] += reading.value_kwh
-
         for hour_start, hour_value in sorted(hourly_totals.items()):
             hour_start_ts = hour_start.timestamp()
             if last_start_ts is not None and hour_start_ts <= last_start_ts:

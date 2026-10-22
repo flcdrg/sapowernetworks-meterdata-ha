@@ -52,6 +52,18 @@ def _sample_detailed_csv_for_nmi_on_day(nmi: str, yyyymmdd: str) -> str:
     )
 
 
+def _sample_detailed_csv_with_partial_hour() -> str:
+    values = ["1.0", "1.5", "2.0"] + ["" for _ in range(45)]
+    joined = ",".join(values)
+    return "\n".join(
+        [
+            "200,20012345678,E1B1,E1,E1,,METER1,KWH,30,",
+            f"300,20260620,{joined},A,,,20260621000000,",
+            "900",
+        ]
+    )
+
+
 def _sample_summary_csv() -> str:
     return (
         "20012345678,1180281,kWh,A,12/09/2024,12/12/2024,837.000,0.000,1006.000,NN\n"
@@ -133,6 +145,48 @@ async def test_coordinator_imports_new_statistics(
     assert len(statistics) == 1
     assert statistics[0]["state"] == 2.5
     assert statistics[0]["sum"] == 2.5
+
+
+async def test_interval_sync_defers_incomplete_hour(
+    hass, mock_config_entry, monkeypatch
+) -> None:
+    """Interval sync should defer a partial hour rather than import its subtotal."""
+    assignment = NmiAssignment(
+        nmi="20012345678",
+        company="SAPN",
+        meter_serial_number="METER1",
+        meter_type_description="Interval",
+        description="Synthetic",
+        is_default=True,
+    )
+    client = AsyncMock()
+    client.download_detailed_csv.return_value = _sample_detailed_csv_with_partial_hour()
+    mock_config_entry.add_to_hass(hass)
+    coordinator = SAPowerNetworksDataUpdateCoordinator(hass, mock_config_entry, client)
+    imported: list[list[dict[str, Any]]] = []
+    monkeypatch.setattr(
+        coordinator,
+        "_async_last_statistic_snapshot",
+        AsyncMock(return_value=(None, 0.0)),
+    )
+    monkeypatch.setattr(
+        "custom_components.sapowernetworks.coordinator.async_add_external_statistics",
+        lambda _hass, _metadata, statistics: imported.append(list(statistics)),
+    )
+
+    result = await coordinator._async_sync_interval_statistics(
+        assignment,
+        datetime(2026, 6, 20, 14, tzinfo=UTC),
+        datetime(2026, 6, 21, tzinfo=UTC),
+    )
+
+    expected_hour = datetime(2026, 6, 19, 14, tzinfo=UTC)
+    assert result.rows_imported == 1
+    assert result.latest_interval_data_point == expected_hour
+    assert result.import_points_by_nmi == {assignment.nmi: ((expected_hour, 2.5),)}
+    assert len(imported) == 1
+    assert imported[0][0]["start"] == expected_hour
+    assert imported[0][0]["state"] == 2.5
 
 
 async def test_coordinator_imports_when_payload_nmi_differs_from_selector(
