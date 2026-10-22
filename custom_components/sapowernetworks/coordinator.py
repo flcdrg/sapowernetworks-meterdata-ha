@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any, TypedDict
 
@@ -44,6 +44,7 @@ from .const import (
     UTC_REFRESH_TIME,
 )
 from .parsing import (
+    NEM12_TIMEZONE,
     IntervalReading,
     SummaryPeriod,
     parse_nem12_content,
@@ -585,11 +586,7 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
         for nmi, nmi_periods in grouped_periods.items():
             import_points_by_nmi[nmi] = [
                 (
-                    datetime.combine(
-                        period.period_end,
-                        datetime.min.time(),
-                        tzinfo=UTC,
-                    ),
+                    self._summary_period_timestamp(period.period_end),
                     period.import_kwh,
                 )
                 for period in sorted(
@@ -663,16 +660,14 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
         if interval_start - accumulated_end > timedelta(days=1):
             return ImportBatchResult(import_points_by_nmi={})
 
-        combined_points = [
-            (point_start, point_value)
-            for point_start, point_value in sorted_accumulated
-            if point_start < interval_start
-        ]
-        combined_points.extend(
-            (point_start, point_value)
-            for point_start, point_value in sorted_interval
-            if point_start >= interval_start
-        )
+        combined_values_by_start: dict[datetime, float] = defaultdict(float)
+        for point_start, point_value in sorted_accumulated:
+            if point_start <= interval_start:
+                combined_values_by_start[point_start] += point_value
+        for point_start, point_value in sorted_interval:
+            if point_start >= interval_start:
+                combined_values_by_start[point_start] += point_value
+        combined_points = sorted(combined_values_by_start.items())
         if not combined_points:
             return ImportBatchResult(import_points_by_nmi={})
 
@@ -915,9 +910,7 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
         for period in sorted(
             periods, key=lambda item: (item.period_end, item.period_start)
         ):
-            period_start = datetime.combine(
-                period.period_end, datetime.min.time(), tzinfo=UTC
-            )
+            period_start = self._summary_period_timestamp(period.period_end)
             period_start_ts = period_start.timestamp()
             if last_start_ts is not None and period_start_ts <= last_start_ts:
                 continue
@@ -936,6 +929,15 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
             )
 
         return statistics
+
+    @staticmethod
+    def _summary_period_timestamp(period_end: date) -> datetime:
+        """Convert a summary period's AEST date boundary to UTC."""
+        return datetime.combine(
+            period_end,
+            datetime.min.time(),
+            tzinfo=NEM12_TIMEZONE,
+        ).astimezone(UTC)
 
     def _build_combined_statistics(
         self,
