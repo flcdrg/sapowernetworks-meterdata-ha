@@ -9,6 +9,15 @@ NEM12_HEADER_MIN_FIELDS = 9
 NEM12_INTERVAL_MIN_FIELDS = 4
 SUMMARY_MIN_FIELDS = 10
 NEM12_TIMEZONE = timezone(timedelta(hours=10), name="AEST")
+ENERGY_UNIT_TO_KWH_FACTOR = {
+    "wh": 0.001,
+    "kwh": 1.0,
+    "mwh": 1000.0,
+}
+
+
+class UnsupportedEnergyUnitError(ValueError):
+    """Raised when a meter-data unit cannot be represented in kWh."""
 
 
 @dataclass(frozen=True)
@@ -62,6 +71,7 @@ def parse_nem12_content(
     parsed: dict[tuple[str, str], list[IntervalReading]] = {}
     current_nmi: str | None = None
     current_suffix: str | None = None
+    current_kwh_factor: float | None = None
     current_interval_mins: int | None = None
 
     for raw_line in content.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
@@ -74,6 +84,7 @@ def parse_nem12_content(
         if indicator == "200" and len(parts) >= NEM12_HEADER_MIN_FIELDS:
             current_nmi = parts[1]
             current_suffix = parts[4]
+            current_kwh_factor = _energy_unit_to_kwh_factor(parts[7])
             try:
                 current_interval_mins = int(parts[8])
             except ValueError:
@@ -86,6 +97,7 @@ def parse_nem12_content(
             indicator == "300"
             and current_nmi
             and current_suffix
+            and current_kwh_factor is not None
             and current_interval_mins
             and current_interval_mins > 0
             and len(parts) >= NEM12_INTERVAL_MIN_FIELDS
@@ -101,6 +113,8 @@ def parse_nem12_content(
                 start = reading_date + (i * delta)
                 value_text = parts[2 + i] if len(parts) > 2 + i else ""
                 value = _parse_float(value_text)
+                if value is not None:
+                    value *= current_kwh_factor
                 parsed[(current_nmi, current_suffix)].append(
                     IntervalReading(
                         interval_start=start,
@@ -127,6 +141,7 @@ def parse_summary_csv(content: str) -> list[SummaryPeriod]:
         end = _parse_au_date(parts[5])
         if start is None or end is None:
             continue
+        kwh_factor = _energy_unit_to_kwh_factor(parts[2])
 
         output.append(
             SummaryPeriod(
@@ -135,9 +150,9 @@ def parse_summary_csv(content: str) -> list[SummaryPeriod]:
                 unit=parts[2],
                 period_start=start,
                 period_end=end,
-                import_kwh=_parse_float(parts[6]) or 0.0,
-                export_kwh=_parse_float(parts[7]) or 0.0,
-                third_value_kwh=_parse_float(parts[8]) or 0.0,
+                import_kwh=(_parse_float(parts[6]) or 0.0) * kwh_factor,
+                export_kwh=(_parse_float(parts[7]) or 0.0) * kwh_factor,
+                third_value_kwh=(_parse_float(parts[8]) or 0.0) * kwh_factor,
                 status=parts[9],
             )
         )
@@ -152,6 +167,15 @@ def _parse_float(value: str) -> float | None:
         return float(value)
     except ValueError:
         return None
+
+
+def _energy_unit_to_kwh_factor(unit: str) -> float:
+    normalized_unit = unit.strip().casefold()
+    try:
+        return ENERGY_UNIT_TO_KWH_FACTOR[normalized_unit]
+    except KeyError as exception:
+        msg = f"Unsupported energy unit {unit!r}; expected Wh, kWh, or MWh"
+        raise UnsupportedEnergyUnitError(msg) from exception
 
 
 def _parse_au_date(value: str) -> date | None:

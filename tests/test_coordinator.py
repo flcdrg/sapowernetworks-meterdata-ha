@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from custom_components.sapowernetworks.api import NmiAssignment
 from custom_components.sapowernetworks.const import DOMAIN, INITIAL_BACKFILL_START
@@ -187,6 +188,45 @@ async def test_interval_sync_defers_incomplete_hour(
     assert len(imported) == 1
     assert imported[0][0]["start"] == expected_hour
     assert imported[0][0]["state"] == 2.5
+
+
+async def test_coordinator_reports_unsupported_energy_units(
+    hass, mock_config_entry, monkeypatch
+) -> None:
+    """Unsupported units should fail the sync instead of importing mislabeled data."""
+    assignment = NmiAssignment(
+        nmi="20012345678",
+        company="SAPN",
+        meter_serial_number="METER1",
+        meter_type_description="Interval",
+        description="Synthetic",
+        is_default=True,
+    )
+    values = ",".join("1.0" for _ in range(48))
+    client = AsyncMock()
+    client.get_nmi_assignments.return_value = [assignment]
+    client.download_detailed_csv.return_value = "\n".join(
+        [
+            f"200,{assignment.nmi},E1B1,E1,E1,,METER1,kVAh,30,",
+            f"300,20260620,{values},A,,,20260621000000,",
+            "900",
+        ]
+    )
+
+    async def _fake_list_statistic_ids(_hass: Any) -> list[dict[str, str]]:
+        return []
+
+    monkeypatch.setattr(
+        "custom_components.sapowernetworks.coordinator.async_list_statistic_ids",
+        _fake_list_statistic_ids,
+    )
+    mock_config_entry.add_to_hass(hass)
+    coordinator = SAPowerNetworksDataUpdateCoordinator(hass, mock_config_entry, client)
+
+    with pytest.raises(UpdateFailed, match="Unsupported energy unit 'kVAh'"):
+        await coordinator._async_update_data()
+
+    client.download_accumulated_summary_csv.assert_not_awaited()
 
 
 async def test_coordinator_imports_when_payload_nmi_differs_from_selector(

@@ -49,6 +49,8 @@ Important: this integration currently imports statistics to Recorder and does no
 - Historical backfill: starts from 2000-01-01 for first import
 - NEM12 interval timestamps and summary period-end dates are interpreted as AEST
   (UTC+10, without daylight-saving adjustment) and converted to UTC before import.
+- Energy readings declared as Wh, kWh, or MWh are normalized to kWh. Unsupported
+  units fail the sync rather than being imported with an incorrect kWh label.
 - Data stream meanings:
 
   | Stream      | Typical meter type                                                | Meaning                                                                                                                                                                                           |
