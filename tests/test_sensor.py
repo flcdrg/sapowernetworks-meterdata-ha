@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
+from homeassistant.helpers import entity_registry as er
+
+from custom_components.sapowernetworks.api import (
+    SAPowerNetworksApiClientCommunicationError,
+)
+from custom_components.sapowernetworks.const import DOMAIN
 from custom_components.sapowernetworks.sensor import (
     ENTITY_DESCRIPTIONS,
     SAPowerNetworksSensor,
@@ -15,6 +22,8 @@ def _build_coordinator(mock_config_entry, data: dict) -> SimpleNamespace:
     coordinator = SimpleNamespace()
     coordinator.config_entry = mock_config_entry
     coordinator.data = data
+    coordinator.last_exception = None
+    coordinator.last_update_success = True
     return coordinator
 
 
@@ -114,6 +123,75 @@ def test_last_error_sensor_returns_string_without_extra_attributes(
 
     assert sensor.native_value == "portal timeout"
     assert sensor.extra_state_attributes is None
+
+
+def test_last_error_sensor_reports_failure_and_clears_after_recovery(
+    mock_config_entry,
+) -> None:
+    """Last Error should stay available through failures and clear after recovery."""
+    coordinator = _build_coordinator(mock_config_entry, {"last_error": ""})
+    coordinator.last_exception = RuntimeError("portal timeout")
+    coordinator.last_update_success = False
+    entity_description = next(
+        description
+        for description in ENTITY_DESCRIPTIONS
+        if description.key == "last_error"
+    )
+
+    sensor = SAPowerNetworksSensor(coordinator, entity_description)
+
+    assert sensor.available is True
+    assert sensor.native_value == "portal timeout"
+
+    coordinator.last_update_success = True
+
+    assert sensor.available is True
+    assert sensor.native_value == ""
+
+
+async def test_last_error_entity_remains_available_during_failed_refresh(
+    hass,
+    mock_config_entry,
+    monkeypatch,
+) -> None:
+    """Home Assistant should show the error sensor through failure and recovery."""
+    client = AsyncMock()
+    client.get_nmi_assignments.return_value = []
+    monkeypatch.setattr(
+        "custom_components.sapowernetworks.SAPowerNetworksApiClient",
+        Mock(return_value=client),
+    )
+    monkeypatch.setattr(
+        "custom_components.sapowernetworks.coordinator.SAPowerNetworksDataUpdateCoordinator._async_existing_statistic_ids",
+        AsyncMock(return_value=set()),
+    )
+    mock_config_entry.add_to_hass(hass)
+
+    assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    entity_id = er.async_get(hass).async_get_entity_id(
+        "sensor",
+        DOMAIN,
+        f"{mock_config_entry.entry_id}_last_error",
+    )
+    assert entity_id is not None
+    assert hass.states.get(entity_id).state == ""
+
+    client.get_nmi_assignments.side_effect = SAPowerNetworksApiClientCommunicationError(
+        "portal timeout"
+    )
+    await mock_config_entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+
+    assert hass.states.get(entity_id).state == "portal timeout"
+
+    client.get_nmi_assignments.side_effect = None
+    client.get_nmi_assignments.return_value = []
+    await mock_config_entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+
+    assert hass.states.get(entity_id).state == ""
 
 
 def test_feed_lag_sensor_returns_float_value(mock_config_entry) -> None:
