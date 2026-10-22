@@ -107,10 +107,10 @@ def test_last_sync_sensor_returns_datetime_value(mock_config_entry) -> None:
 @pytest.mark.parametrize(
     ("message", "expected"),
     [
-        ("portal timeout", "portal timeout"),
+        ("portal timeout", "Error reported"),
         (
             "Portal error for user@example.com NMI 20012345678 csrf=synthetic-token",
-            "Portal error for <redacted-email> NMI *******5678 csrf=<redacted>",
+            "Error reported",
         ),
     ],
 )
@@ -141,10 +141,10 @@ def test_last_error_sensor_returns_string_without_extra_attributes(
 @pytest.mark.parametrize(
     ("message", "expected"),
     [
-        ("portal timeout", "portal timeout"),
+        ("portal timeout", "Update failed"),
         (
             "Portal error for user@example.com NMI 20012345678 csrf=synthetic-token",
-            "Portal error for <redacted-email> NMI *******5678 csrf=<redacted>",
+            "Update failed",
         ),
         ("", "RuntimeError"),
     ],
@@ -210,9 +210,7 @@ async def test_last_error_entity_remains_available_during_failed_refresh(
     await mock_config_entry.runtime_data.async_refresh()
     await hass.async_block_till_done()
 
-    assert hass.states.get(entity_id).state == (
-        "Portal error for <redacted-email> NMI *******5678 csrf=<redacted>"
-    )
+    assert hass.states.get(entity_id).state == "Update failed"
 
     client.get_nmi_assignments.side_effect = None
     client.get_nmi_assignments.return_value = []
