@@ -265,8 +265,12 @@ class SAPowerNetworksApiClient:
                 block_start,
                 block_end,
             )
-            if _is_summary_csv_payload(chunk):
-                chunks.append(chunk)
+            if not chunk.strip():
+                continue
+            if not _is_summary_csv_payload(chunk):
+                msg = "Unexpected accumulated summary response"
+                raise SAPowerNetworksApiClientParseError(msg)
+            chunks.append(chunk)
 
         if not chunks:
             return ""
@@ -286,6 +290,10 @@ class SAPowerNetworksApiClient:
             f"/meterdata/{CAD_REQUEST_METER_DATA_PATH}?{urlencode({'selNMI': nmi})}",
         )
         async with self._session.get(page_url) as response:
+            self._check_accumulated_summary_response_status(
+                response.status,
+                "page request",
+            )
             html = await response.text()
 
         hidden_inputs = self._extract_hidden_inputs(html)
@@ -322,7 +330,25 @@ class SAPowerNetworksApiClient:
             data=payload,
             headers=self._browser_headers(referer=page_url),
         ) as response:
+            self._check_accumulated_summary_response_status(
+                response.status,
+                "form submission",
+            )
             return await response.text()
+
+    def _check_accumulated_summary_response_status(
+        self,
+        status: int,
+        operation: str,
+    ) -> None:
+        """Raise typed errors for failed summary form HTTP requests."""
+        if status == self._HTTP_OK:
+            return
+        if status in {self._HTTP_UNAUTHORIZED, self._HTTP_FORBIDDEN}:
+            msg = f"Accumulated summary {operation} rejected with status: {status}"
+            raise SAPowerNetworksApiClientAuthenticationError(msg)
+        msg = f"Accumulated summary {operation} failed with status: {status}"
+        raise SAPowerNetworksApiClientCommunicationError(msg)
 
     async def _ensure_authenticated(self, *, force: bool = False) -> None:
         """Ensure authenticated cookie session exists."""
