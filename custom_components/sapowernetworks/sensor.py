@@ -109,8 +109,26 @@ class SAPowerNetworksSensor(SAPowerNetworksEntity, SensorEntity):
         self.entity_description = entity_description
 
     @property
+    def available(self) -> bool:
+        """Keep the Last Error sensor available when coordinator updates fail."""
+        if (
+            self.entity_description.key == "last_error"
+            and self.coordinator.last_exception is not None
+        ):
+            return True
+        return super().available
+
+    @property
     def native_value(self) -> datetime | str | int | float | bool | None:
         """Return the native value of the sensor."""
+        if (
+            self.entity_description.key == "last_error"
+            and not self.coordinator.last_update_success
+            and self.coordinator.last_exception is not None
+        ):
+            exception = self.coordinator.last_exception
+            return str(exception) or type(exception).__name__
+
         data = self.coordinator.data
         if not isinstance(data, dict):
             return None
