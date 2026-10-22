@@ -227,3 +227,4 @@ config/*
 # data
 *.csv
 *.har
+*.pdf

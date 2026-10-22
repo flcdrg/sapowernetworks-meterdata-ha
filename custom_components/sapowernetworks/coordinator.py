@@ -47,6 +47,7 @@ from .parsing import (
     NEM12_TIMEZONE,
     IntervalReading,
     SummaryPeriod,
+    UnsupportedEnergyUnitError,
     parse_nem12_content,
     parse_summary_csv,
 )
@@ -212,6 +213,8 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
             }
         except SAPowerNetworksApiClientAuthenticationError as exception:
             raise ConfigEntryAuthFailed(exception) from exception
+        except UnsupportedEnergyUnitError as exception:
+            raise UpdateFailed(exception) from exception
         except SAPowerNetworksApiClientError as exception:
             raise UpdateFailed(exception) from exception
 

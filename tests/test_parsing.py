@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
+
 from custom_components.sapowernetworks.parsing import (
+    UnsupportedEnergyUnitError,
     parse_nem12_content,
     parse_nem12_datetime,
     parse_summary_csv,
@@ -48,6 +51,48 @@ def test_parse_nem12_five_minute_row_count() -> None:
     assert len(parsed[key]) == 288
 
 
+@pytest.mark.parametrize(
+    ("unit", "reading_value", "expected_kwh"),
+    [
+        ("Wh", "1000.0", 1.0),
+        ("KWH", "1.25", 1.25),
+        ("MWh", "0.5", 500.0),
+    ],
+)
+def test_parse_nem12_normalizes_energy_units_to_kwh(
+    unit: str,
+    reading_value: str,
+    expected_kwh: float,
+) -> None:
+    """NEM12 interval values should be normalized using their declared unit."""
+    values = [reading_value, reading_value] + ["" for _ in range(46)]
+    sample = "\n".join(
+        [
+            f"200,20012345678,E1B1,E1,E1,,METER1,{unit},30,",
+            f"300,20260620,{','.join(values)},A,,,20260621000000,",
+            "900",
+        ]
+    )
+
+    readings = parse_nem12_content(sample)[("20012345678", "E1")]
+
+    assert readings[0].value_kwh == expected_kwh
+
+
+def test_parse_nem12_rejects_non_energy_unit_for_kwh_statistics() -> None:
+    """Reactive energy must not be mislabeled as kWh."""
+    sample = "\n".join(
+        [
+            "200,20012345678,E1B1,E1,E1,,METER1,kVArh,30,",
+            f"300,20260620,{','.join('1.0' for _ in range(48))},A,,,20260621000000,",
+            "900",
+        ]
+    )
+
+    with pytest.raises(UnsupportedEnergyUnitError, match="kVArh"):
+        parse_nem12_content(sample)
+
+
 def test_parse_nem12_datetime_converts_fixed_aest_to_utc() -> None:
     """NEM12 timestamps use AEST year-round, including during daylight saving."""
     assert parse_nem12_datetime("20260620") == datetime(2026, 6, 19, 14, 0, tzinfo=UTC)
@@ -73,3 +118,23 @@ def test_parse_summary_csv_rows() -> None:
     assert periods[0].export_kwh == 0.0
     assert periods[0].third_value_kwh == 1006.0
     assert periods[0].status == "NN"
+
+
+def test_parse_summary_csv_normalizes_energy_values_to_kwh() -> None:
+    """Summary totals should be normalized using the report's declared unit."""
+    sample = "20012345678,1180281,MWh,A,12/09/2024,12/12/2024,1.5,0.25,2.5,NN"
+
+    period = parse_summary_csv(sample)[0]
+
+    assert period.unit == "MWh"
+    assert period.import_kwh == 1500.0
+    assert period.export_kwh == 250.0
+    assert period.third_value_kwh == 2500.0
+
+
+def test_parse_summary_csv_rejects_non_energy_unit_for_kwh_statistics() -> None:
+    """Reactive energy must not be mislabeled as kWh."""
+    sample = "20012345678,1180281,kVArh,A,12/09/2024,12/12/2024,1.5,0.25,2.5,NN"
+
+    with pytest.raises(UnsupportedEnergyUnitError, match="kVArh"):
+        parse_summary_csv(sample)
