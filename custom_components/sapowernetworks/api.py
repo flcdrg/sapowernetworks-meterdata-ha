@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 import math
 import re
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlencode, urljoin
 
 import aiohttp
@@ -27,6 +28,9 @@ from .const import (
 )
 from .parsing import parse_summary_csv
 from .privacy import redact_mapping, redact_text
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 
 @dataclass(frozen=True)
@@ -100,6 +104,21 @@ class SAPowerNetworksApiClient:
         self._password = password
         self._session = session
         self._is_authenticated = False
+
+    @asynccontextmanager
+    async def _request(
+        self,
+        method: Literal["GET", "POST"],
+        url: str,
+        **kwargs: Any,
+    ) -> AsyncIterator[aiohttp.ClientResponse]:
+        """Normalize transport errors from portal requests."""
+        try:
+            async with self._session.request(method, url, **kwargs) as response:
+                yield response
+        except (aiohttp.ClientError, TimeoutError) as exception:
+            msg = f"Portal {method} request failed ({type(exception).__name__})"
+            raise SAPowerNetworksApiClientCommunicationError(msg) from exception
 
     async def test_credentials(self) -> None:
         """Validate account credentials by performing login and assignment fetch."""
@@ -289,7 +308,7 @@ class SAPowerNetworksApiClient:
             PORTAL_BASE_URL,
             f"/meterdata/{CAD_REQUEST_METER_DATA_PATH}?{urlencode({'selNMI': nmi})}",
         )
-        async with self._session.get(page_url) as response:
+        async with self._request("GET", page_url) as response:
             self._check_accumulated_summary_response_status(
                 response.status,
                 "page request",
@@ -325,7 +344,8 @@ class SAPowerNetworksApiClient:
         if self._VIEWSTATE_CSRF in hidden_inputs:
             payload[self._VIEWSTATE_CSRF] = hidden_inputs[self._VIEWSTATE_CSRF]
 
-        async with self._session.post(
+        async with self._request(
+            "POST",
             post_url,
             data=payload,
             headers=self._browser_headers(referer=page_url),
@@ -367,14 +387,15 @@ class SAPowerNetworksApiClient:
         """Check whether this client's HTTP session has a valid portal login."""
         dashboard_url = urljoin(PORTAL_BASE_URL + "/meterdata/", CAD_DASHBOARD_PATH)
         try:
-            async with self._session.get(
+            async with self._request(
+                "GET",
                 dashboard_url,
                 headers=self._browser_headers(referer=PORTAL_BASE_URL),
             ) as response:
                 if response.status != self._HTTP_OK:
                     return False
                 page = await response.text()
-        except aiohttp.ClientError, TimeoutError:
+        except SAPowerNetworksApiClientCommunicationError:
             return False
 
         return bool(self._extract_vf_json(page))
@@ -385,7 +406,8 @@ class SAPowerNetworksApiClient:
         ref = urlencode({"refURL": login_page_url})
         page_url = f"{login_page_url}?{ref}"
 
-        async with self._session.get(
+        async with self._request(
+            "GET",
             page_url,
             headers=self._browser_headers(referer=login_page_url),
         ) as response:
@@ -423,7 +445,8 @@ class SAPowerNetworksApiClient:
             },
         )
 
-        async with self._session.post(
+        async with self._request(
+            "POST",
             post_url,
             data=form,
             headers=self._browser_headers(referer=page_url),
@@ -460,7 +483,8 @@ class SAPowerNetworksApiClient:
             raise SAPowerNetworksApiClientAuthenticationError(msg)
 
         redirect_url = urljoin(PORTAL_BASE_URL, redirect)
-        async with self._session.get(
+        async with self._request(
+            "GET",
             redirect_url,
             headers=self._browser_headers(referer=page_url),
         ) as response:
@@ -509,12 +533,8 @@ class SAPowerNetworksApiClient:
     async def _update_methods_raw(self, path: str) -> str:
         """Load a page and extract embedded Visualforce remoting context JSON."""
         url = urljoin(PORTAL_BASE_URL + "/meterdata/", path)
-        try:
-            async with self._session.get(url) as response:
-                text = await response.text()
-        except Exception as exception:
-            msg = "Unable to resolve remoting methods"
-            raise SAPowerNetworksApiClientCommunicationError(msg) from exception
+        async with self._request("GET", url) as response:
+            text = await response.text()
 
         vf_json = self._extract_vf_json(text)
         if not vf_json:
@@ -550,7 +570,8 @@ class SAPowerNetworksApiClient:
                 "body": body,
             },
         )
-        async with self._session.post(
+        async with self._request(
+            "POST",
             url,
             data=payload,
             headers={

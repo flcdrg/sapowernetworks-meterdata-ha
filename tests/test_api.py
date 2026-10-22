@@ -6,9 +6,11 @@ import json
 from datetime import UTC, datetime, timedelta
 from typing import Any, Never, Self
 
+import aiohttp
 import pytest
 
 from custom_components.sapowernetworks.api import (
+    SalesforceMethod,
     SAPowerNetworksApiClient,
     SAPowerNetworksApiClientAuthenticationError,
     SAPowerNetworksApiClientCommunicationError,
@@ -559,6 +561,14 @@ async def test_accumulated_summary_form_http_errors_are_reported(
         def post(self, *_args: Any, **_kwargs: Any) -> _FakeResponse:
             return self.post_response
 
+        def request(
+            self,
+            method: str,
+            *_args: Any,
+            **_kwargs: Any,
+        ) -> _FakeResponse:
+            return self.get_response if method == "GET" else self.post_response
+
     fake_secret = "synthetic-test-value"
     client = SAPowerNetworksApiClient(
         username="user@example.com",
@@ -609,6 +619,83 @@ async def test_accumulated_summary_form_rejects_unexpected_nonempty_payload(
             datetime(2024, 1, 1, tzinfo=UTC),
             datetime(2024, 2, 1, tzinfo=UTC),
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["rpc", "login", "summary", "probe"])
+@pytest.mark.parametrize(
+    "network_error_type",
+    [TimeoutError, aiohttp.ClientConnectionError],
+)
+async def test_portal_network_errors_are_normalized(
+    monkeypatch,
+    operation: str,
+    network_error_type: type[Exception],
+) -> None:
+    """Network errors should be normalized or handled by the session probe."""
+    fake_secret = "synthetic-test-value"
+
+    class _FailingRequest:
+        async def __aenter__(self) -> Never:
+            msg = "simulated request timeout"
+            raise network_error_type(msg)
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    class _FailingSession:
+        def request(self, *_args: Any, **_kwargs: Any) -> _FailingRequest:
+            return _FailingRequest()
+
+        def post(self, *_args: Any, **_kwargs: Any) -> _FailingRequest:
+            return _FailingRequest()
+
+    client = SAPowerNetworksApiClient(
+        username="user@example.com",
+        password=fake_secret,
+        session=_FailingSession(),  # type: ignore[arg-type]
+    )
+    method = SalesforceMethod(
+        action="Controller",
+        service="meterdata/apexremote",
+        vid="vid",
+        csrf="csrf",
+        ns="",
+        ver="1",
+        authorization="authorization",
+    )
+
+    async def _no_auth_needed() -> None:
+        return None
+
+    async def _make_request() -> None:
+        if operation == "rpc":
+            await client.invoke_rpc(
+                "CADRequestMeterData",
+                "downloadNMIData",
+                method,
+                None,
+            )
+        elif operation == "login":
+            await client._perform_login()
+        else:
+            monkeypatch.setattr(client, "_ensure_authenticated", _no_auth_needed)
+            await client._download_accumulated_summary_csv_form(
+                "20012345678",
+                datetime(2024, 1, 1, tzinfo=UTC),
+                datetime(2024, 2, 1, tzinfo=UTC),
+            )
+
+    if operation == "probe":
+        assert await client._session_appears_authenticated() is False
+    else:
+        with pytest.raises(
+            SAPowerNetworksApiClientCommunicationError,
+            match=network_error_type.__name__,
+        ) as raised:
+            await _make_request()
+
+        assert isinstance(raised.value.__cause__, network_error_type)
 
 
 @pytest.mark.asyncio
