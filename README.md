@@ -61,6 +61,9 @@ Important: this integration currently imports statistics to Recorder and does no
   - Combined is import-focused (Combined Import) and is used to give one continuous import history across stream handoff.
   - If a combined stream already exists, new interval import points can continue that stream on later syncs.
 - Partial hours are deferred until a later sync rather than imported as hourly subtotals.
+- Meters identified by the portal as Accumulated skip detailed interval downloads
+  unless interval or combined statistics already exist. Interval and unknown meter
+  types remain eligible for interval backfill, including after a meter handover.
 
 Statistic display names begin with SA Power Networks and include direction labels such as Import, Export, Accumulated Import, Accumulated Export, and Combined Import.
 
