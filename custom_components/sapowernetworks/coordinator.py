@@ -241,10 +241,10 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
             masked_nmi = mask_identifier(assignment.nmi)
             interval_result = ImportBatchResult(import_points_by_nmi={})
             interval_fetch_start = await self._async_fetch_start(
-                assignment.nmi,
+                assignment,
                 existing_statistic_ids,
             )
-            if interval_fetch_start < fetch_end:
+            if interval_fetch_start is not None and interval_fetch_start < fetch_end:
                 LOGGER.debug(
                     "Interval sync window for %s: %s to %s",
                     masked_nmi,
@@ -782,16 +782,32 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
 
     async def _async_fetch_start(
         self,
-        nmi: str,
+        assignment: NmiAssignment,
         existing_statistic_ids: set[str],
-    ) -> datetime:
-        """Determine the earliest missing window start for an NMI."""
+    ) -> datetime | None:
+        """Determine interval fetch start, or skip a known summary-only meter."""
+        nmi = assignment.nmi
+        statistic_prefix = self._statistic_prefix(nmi)
+        interval_prefixes = tuple(
+            f"{statistic_prefix}{direction}_"
+            for direction in ("import", "export", "channel")
+        )
+        combined_statistic_id = self._combined_statistic_id(nmi)
         matching_ids = {
             statistic_id
             for statistic_id in existing_statistic_ids
-            if statistic_id.startswith(self._statistic_prefix(nmi))
+            if statistic_id.startswith(interval_prefixes)
+            or statistic_id == combined_statistic_id
         }
         if not matching_ids:
+            if (
+                assignment.meter_type_description or ""
+            ).strip().casefold() == "accumulated":
+                LOGGER.debug(
+                    "Skipping interval sync for accumulated-only meter %s",
+                    mask_identifier(nmi),
+                )
+                return None
             return INITIAL_BACKFILL_START
 
         latest_datetimes = []

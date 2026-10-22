@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from custom_components.sapowernetworks.api import NmiAssignment
-from custom_components.sapowernetworks.const import DOMAIN
+from custom_components.sapowernetworks.const import DOMAIN, INITIAL_BACKFILL_START
 from custom_components.sapowernetworks.coordinator import (
     SAPowerNetworksDataUpdateCoordinator,
 )
@@ -324,6 +324,53 @@ async def test_coordinator_skips_existing_statistics(
     assert called_start == datetime(2026, 6, 20, 1, 0, tzinfo=UTC)
 
 
+@pytest.mark.parametrize("meter_type_description", ["Interval", "Accumulated", None])
+async def test_interval_fetch_start_excludes_accumulated_watermark(
+    hass, mock_config_entry, monkeypatch, meter_type_description: str | None
+) -> None:
+    """Interval fetching should ignore summary but retain hourly stream watermarks."""
+    nmi = "20012345678"
+    coordinator = SAPowerNetworksDataUpdateCoordinator(
+        hass,
+        mock_config_entry,
+        AsyncMock(),
+    )
+    assignment = NmiAssignment(
+        nmi=nmi,
+        company="SAPN",
+        meter_serial_number="METER1",
+        meter_type_description=meter_type_description,
+        description="Synthetic",
+        is_default=True,
+    )
+    interval_start = datetime(2026, 6, 10, 12, tzinfo=UTC)
+    later_interval_start = datetime(2026, 6, 12, 10, tzinfo=UTC)
+    combined_start = datetime(2026, 6, 9, 12, tzinfo=UTC)
+    recorded_starts = {
+        coordinator._statistic_id(nmi, "E1"): interval_start.timestamp(),
+        coordinator._statistic_id(nmi, "B1"): later_interval_start.timestamp(),
+        coordinator._summary_statistic_id(nmi, "accumulated_import"): datetime(
+            2024, 12, 11, 14, tzinfo=UTC
+        ).timestamp(),
+        coordinator._combined_statistic_id(nmi): combined_start.timestamp(),
+    }
+
+    async def _fake_last_statistic_snapshot(
+        statistic_id: str,
+    ) -> tuple[float | None, float]:
+        return recorded_starts[statistic_id], 0.0
+
+    monkeypatch.setattr(
+        coordinator,
+        "_async_last_statistic_snapshot",
+        _fake_last_statistic_snapshot,
+    )
+
+    fetch_start = await coordinator._async_fetch_start(assignment, set(recorded_starts))
+
+    assert fetch_start == combined_start + timedelta(hours=1)
+
+
 async def test_coordinator_imports_accumulated_statistics(
     hass, mock_config_entry, monkeypatch
 ) -> None:
@@ -403,18 +450,34 @@ async def test_coordinator_imports_accumulated_statistics(
         2024, 12, 11, 14, tzinfo=UTC
     )
     assert by_statistic_id[export_stat_id][0]["sum"] == 12.5
+    client.download_detailed_csv.assert_not_awaited()
 
 
+@pytest.mark.parametrize(
+    ("meter_type_description", "expect_interval_fetch"),
+    [
+        ("Accumulated", False),
+        (" accumulated ", False),
+        ("Interval", True),
+        (None, True),
+        ("Unknown", True),
+    ],
+)
 async def test_coordinator_advances_accumulated_fetch_start(
-    hass, mock_config_entry, monkeypatch
+    hass,
+    mock_config_entry,
+    monkeypatch,
+    meter_type_description: str | None,
+    *,
+    expect_interval_fetch: bool,
 ) -> None:
-    """Accumulated sync should request data after the latest imported summary period."""
+    """Summary-only meters should not repeat detailed backfills on each refresh."""
     client = AsyncMock()
     assignment = NmiAssignment(
         nmi="20012345678",
         company="SAPN",
         meter_serial_number="METER1",
-        meter_type_description="Accumulated",
+        meter_type_description=meter_type_description,
         description="Synthetic",
         is_default=True,
     )
@@ -459,9 +522,19 @@ async def test_coordinator_advances_accumulated_fetch_start(
     coordinator = SAPowerNetworksDataUpdateCoordinator(hass, mock_config_entry, client)
 
     await coordinator._async_update_data()
+    await coordinator._async_update_data()
 
     called_start = client.download_accumulated_summary_csv.await_args.args[1]
     assert called_start == datetime(2025, 10, 16, 0, 0, tzinfo=UTC)
+    assert client.download_accumulated_summary_csv.await_count == 2
+    if expect_interval_fetch:
+        assert client.download_detailed_csv.await_count == 2
+        assert all(
+            call.args[1] == INITIAL_BACKFILL_START
+            for call in client.download_detailed_csv.await_args_list
+        )
+    else:
+        client.download_detailed_csv.assert_not_awaited()
 
 
 async def test_coordinator_imports_multiple_nmis(
@@ -650,8 +723,9 @@ async def test_coordinator_imports_accumulated_when_payload_nmi_differs_from_sel
     )
 
 
+@pytest.mark.parametrize("summary_already_imported", [False, True])
 async def test_coordinator_imports_combined_when_streams_are_consecutive(
-    hass, mock_config_entry, monkeypatch
+    hass, mock_config_entry, monkeypatch, *, summary_already_imported: bool
 ) -> None:
     """Coordinator should add a combined import stream for consecutive meters."""
     client = AsyncMock()
@@ -672,10 +746,34 @@ async def test_coordinator_imports_combined_when_streams_are_consecutive(
         assignment.nmi
     )
 
+    mock_config_entry.add_to_hass(hass)
+    coordinator = SAPowerNetworksDataUpdateCoordinator(hass, mock_config_entry, client)
+    summary_statistic_id = coordinator._summary_statistic_id(
+        assignment.nmi, "accumulated_import"
+    )
     imported: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
 
     async def _fake_list_statistic_ids(_hass: Any) -> list[dict[str, str]]:
+        if summary_already_imported:
+            return [{"statistic_id": summary_statistic_id}]
         return []
+
+    def _fake_get_last_statistics(
+        _hass: Any,
+        _count: int,
+        statistic_id: str,
+        *_args: Any,
+    ) -> dict[str, list[dict[str, float]]]:
+        if summary_already_imported and statistic_id == summary_statistic_id:
+            return {
+                statistic_id: [
+                    {
+                        "start": datetime(2024, 12, 11, 14, tzinfo=UTC).timestamp(),
+                        "sum": 837.0,
+                    }
+                ]
+            }
+        return {}
 
     def _fake_add_external_statistics(
         _hass: Any,
@@ -694,18 +792,16 @@ async def test_coordinator_imports_combined_when_streams_are_consecutive(
     )
     monkeypatch.setattr(
         "custom_components.sapowernetworks.coordinator.get_last_statistics",
-        lambda *_args, **_kwargs: {},
+        _fake_get_last_statistics,
     )
     monkeypatch.setattr(
         "custom_components.sapowernetworks.coordinator.get_instance",
         lambda _hass: _FakeRecorderInstance(),
     )
 
-    mock_config_entry.add_to_hass(hass)
-    coordinator = SAPowerNetworksDataUpdateCoordinator(hass, mock_config_entry, client)
-
     result = await coordinator._async_update_data()
 
+    assert client.download_detailed_csv.await_args.args[1] == INITIAL_BACKFILL_START
     assert result["combined_rows_imported"] == 2
     assert result["combined_channels_imported"] == 1
     assert len(result["combined_statistic_ids"]) == 1
