@@ -9,9 +9,17 @@ from unittest.mock import AsyncMock
 import pytest
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
-from custom_components.sapowernetworks.api import NmiAssignment
-from custom_components.sapowernetworks.const import DOMAIN, INITIAL_BACKFILL_START
+from custom_components.sapowernetworks.api import (
+    NmiAssignment,
+    SAPowerNetworksApiClientCommunicationError,
+)
+from custom_components.sapowernetworks.const import (
+    COMBINED_BACKFILL_ATTEMPTS,
+    DOMAIN,
+    INITIAL_BACKFILL_START,
+)
 from custom_components.sapowernetworks.coordinator import (
+    ImportBatchResult,
     SAPowerNetworksDataUpdateCoordinator,
 )
 
@@ -857,6 +865,258 @@ async def test_coordinator_imports_combined_when_streams_are_consecutive(
     assert combined_rows[0]["sum"] == 837.0
     assert combined_rows[1]["state"] == 1022.5
     assert combined_rows[1]["sum"] == 1859.5
+
+
+async def test_coordinator_backfills_combined_from_existing_source_statistics(
+    hass, mock_config_entry, monkeypatch
+) -> None:
+    """Initialize combined history from existing accumulated and interval sources."""
+    nmi = "20012345678"
+    assignment = NmiAssignment(
+        nmi=nmi,
+        company="SAPN",
+        meter_serial_number="METER1",
+        meter_type_description="Interval",
+        description="Synthetic",
+        is_default=True,
+    )
+    client = AsyncMock()
+    client.get_nmi_assignments.return_value = [assignment]
+
+    async def _fake_download_detailed_csv(
+        _nmi: str,
+        start: datetime,
+        _end: datetime,
+    ) -> str:
+        if start == INITIAL_BACKFILL_START:
+            values = ",".join(["1.0", "1.5"] + ["" for _ in range(46)])
+            return "\n".join(
+                [
+                    f"200,{nmi},E1B1,E1,E1,,METER1,KWH,30,",
+                    f"300,20250318,{values},A,,,20250318235959,",
+                    f"300,20250321,{values},A,,,20250321235959,",
+                    "900",
+                ]
+            )
+        return _sample_detailed_csv_for_nmi_on_day(nmi, "20250321")
+
+    async def _fake_download_accumulated_summary_csv(
+        _nmi: str,
+        start: datetime,
+        _end: datetime,
+    ) -> str:
+        if start == INITIAL_BACKFILL_START:
+            return _sample_summary_csv_for_nmi(nmi)
+        return ""
+
+    client.download_detailed_csv.side_effect = _fake_download_detailed_csv
+    client.download_accumulated_summary_csv.side_effect = (
+        _fake_download_accumulated_summary_csv
+    )
+
+    mock_config_entry.add_to_hass(hass)
+    coordinator = SAPowerNetworksDataUpdateCoordinator(hass, mock_config_entry, client)
+    interval_statistic_id = coordinator._statistic_id(nmi, "E1")
+    summary_statistic_id = coordinator._summary_statistic_id(
+        nmi,
+        "accumulated_import",
+    )
+    imported: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
+    interval_last = datetime(2025, 3, 19, 14, tzinfo=UTC)
+    summary_last = datetime(2025, 3, 17, 14, tzinfo=UTC)
+
+    async def _fake_list_statistic_ids(_hass: Any) -> list[dict[str, str]]:
+        return [
+            {"statistic_id": interval_statistic_id},
+            {"statistic_id": summary_statistic_id},
+        ]
+
+    def _fake_get_last_statistics(
+        _hass: Any,
+        _count: int,
+        statistic_id: str,
+        *_args: Any,
+    ) -> dict[str, list[dict[str, float]]]:
+        last_start = {
+            interval_statistic_id: interval_last,
+            summary_statistic_id: summary_last,
+        }.get(statistic_id)
+        if last_start is None:
+            return {}
+        return {
+            statistic_id: [
+                {
+                    "start": last_start.timestamp(),
+                    "sum": 1857.0 if statistic_id == summary_statistic_id else 10.0,
+                }
+            ]
+        }
+
+    def _fake_add_external_statistics(
+        _hass: Any,
+        metadata: dict[str, Any],
+        statistics: list[dict[str, Any]],
+    ) -> None:
+        imported.append((metadata, list(statistics)))
+
+    monkeypatch.setattr(
+        "custom_components.sapowernetworks.coordinator.async_list_statistic_ids",
+        _fake_list_statistic_ids,
+    )
+    monkeypatch.setattr(
+        "custom_components.sapowernetworks.coordinator.async_add_external_statistics",
+        _fake_add_external_statistics,
+    )
+    monkeypatch.setattr(
+        "custom_components.sapowernetworks.coordinator.get_last_statistics",
+        _fake_get_last_statistics,
+    )
+    monkeypatch.setattr(
+        "custom_components.sapowernetworks.coordinator.get_instance",
+        lambda _hass: _FakeRecorderInstance(),
+    )
+
+    result = await coordinator._async_update_data()
+
+    assert result["combined_rows_imported"] == 3
+    assert client.download_detailed_csv.await_args_list[-1].args[1] == (
+        INITIAL_BACKFILL_START
+    )
+    assert client.download_accumulated_summary_csv.await_args_list[-1].args[1] == (
+        INITIAL_BACKFILL_START
+    )
+    combined_statistic_id = coordinator._combined_statistic_id(nmi)
+    combined_rows = next(
+        statistics
+        for metadata, statistics in imported
+        if metadata["statistic_id"] == combined_statistic_id
+    )
+    assert combined_rows[0]["state"] == 837.0
+    assert combined_rows[1]["state"] == 1022.5
+    assert combined_rows[1]["sum"] == 1859.5
+    assert combined_rows[2]["sum"] == 1862.0
+    assert COMBINED_BACKFILL_ATTEMPTS not in mock_config_entry.data
+
+
+@pytest.mark.parametrize("history", ["nonconsecutive", "empty"])
+@pytest.mark.parametrize("fail_first", [False, True])
+async def test_unmatched_combined_backfill_is_not_repeated(
+    hass, mock_config_entry, monkeypatch, history: str, *, fail_first: bool
+) -> None:
+    """Remember completed attempts across refreshes and coordinator recreation."""
+    nmi = "20012345678"
+    assignments = [
+        NmiAssignment(
+            nmi=nmi,
+            company="SAPN",
+            meter_serial_number="METER1",
+            meter_type_description="Interval",
+            description="Synthetic",
+            is_default=True,
+        )
+    ]
+    client = AsyncMock()
+    client.get_nmi_assignments.return_value = assignments
+    client.download_detailed_csv.return_value = (
+        _sample_detailed_csv_for_nmi_on_day(nmi, "20260620")
+        if history == "nonconsecutive"
+        else ""
+    )
+    client.download_accumulated_summary_csv.return_value = (
+        _sample_summary_csv_for_nmi(nmi) if history == "nonconsecutive" else ""
+    )
+    mock_config_entry.add_to_hass(hass)
+    existing_ids: set[str] = set()
+    incremental_sync_windows: list[datetime] = []
+
+    async def _last_statistic_snapshot(
+        statistic_id: str,
+    ) -> tuple[float | None, float]:
+        if statistic_id.endswith("_combined_import"):
+            return None, 0.0
+        return datetime(2026, 6, 19, 14, tzinfo=UTC).timestamp(), 10.0
+
+    async def _sync_source_statistics(
+        _assignment: NmiAssignment,
+        fetch_start: datetime,
+        _fetch_end: datetime,
+    ) -> ImportBatchResult:
+        assert fetch_start > INITIAL_BACKFILL_START
+        incremental_sync_windows.append(fetch_start)
+        return ImportBatchResult(import_points_by_nmi={})
+
+    def _make_coordinator() -> SAPowerNetworksDataUpdateCoordinator:
+        coordinator = SAPowerNetworksDataUpdateCoordinator(
+            hass, mock_config_entry, client
+        )
+        monkeypatch.setattr(
+            coordinator,
+            "_async_existing_statistic_ids",
+            AsyncMock(return_value=existing_ids),
+        )
+        monkeypatch.setattr(
+            coordinator,
+            "_async_last_statistic_snapshot",
+            _last_statistic_snapshot,
+        )
+        for method in (
+            "_async_sync_interval_statistics",
+            "_async_sync_accumulated_statistics",
+        ):
+            monkeypatch.setattr(
+                coordinator,
+                method,
+                _sync_source_statistics,
+            )
+        return coordinator
+
+    coordinator = _make_coordinator()
+    existing_ids.update(
+        {
+            coordinator._statistic_id(nmi, "E1"),
+            coordinator._summary_statistic_id(nmi, "accumulated_import"),
+        }
+    )
+    if fail_first:
+        client.download_accumulated_summary_csv.side_effect = (
+            SAPowerNetworksApiClientCommunicationError("Summary download failed")
+        )
+        with pytest.raises(UpdateFailed, match="Summary download failed"):
+            await coordinator._async_update_data()
+        assert COMBINED_BACKFILL_ATTEMPTS not in mock_config_entry.data
+        client.download_accumulated_summary_csv.side_effect = None
+        client.download_detailed_csv.reset_mock()
+        client.download_accumulated_summary_csv.reset_mock()
+
+    for _ in range(2):
+        result = await coordinator._async_update_data()
+        assert result["combined_rows_imported"] == 0
+    assert len(incremental_sync_windows) == (6 if fail_first else 4)
+    coordinator = _make_coordinator()
+    await coordinator._async_update_data()
+
+    client.download_detailed_csv.assert_awaited_once()
+    client.download_accumulated_summary_csv.assert_awaited_once()
+    assert len(mock_config_entry.data[COMBINED_BACKFILL_ATTEMPTS]) == 1
+
+    new_nmi = "20011111111"
+    assignments.append(
+        NmiAssignment(
+            nmi=new_nmi,
+            company="SAPN",
+            meter_serial_number="METER2",
+            meter_type_description="Accumulated",
+            description="Another source",
+            is_default=False,
+        )
+    )
+    existing_ids.add(coordinator._summary_statistic_id(new_nmi, "accumulated_import"))
+    await coordinator._async_update_data()
+    assert client.download_detailed_csv.await_count == 2
+    assert client.download_accumulated_summary_csv.await_count == 3
+    await _make_coordinator()._async_update_data()
+    assert client.download_detailed_csv.await_count == 2
+    assert client.download_accumulated_summary_csv.await_count == 3
 
 
 async def test_combined_import_preserves_accumulated_point_at_handover(

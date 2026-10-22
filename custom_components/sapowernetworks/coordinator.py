@@ -36,6 +36,7 @@ from .api import (
     SAPowerNetworksApiClientError,
 )
 from .const import (
+    COMBINED_BACKFILL_ATTEMPTS,
     DOMAIN,
     INITIAL_BACKFILL_START,
     LOCAL_REFRESH_TIME,
@@ -336,6 +337,14 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
                     accumulated_result.channels_imported,
                 )
 
+        backfill_candidates = await self._async_backfill_combined_source_history(
+            assignments,
+            existing_statistic_ids,
+            interval_import_points_by_nmi,
+            accumulated_import_points_by_nmi,
+            fetch_end,
+        )
+
         selected_pairs = self._select_consecutive_stream_pairs(
             accumulated_import_points_by_nmi,
             interval_import_points_by_nmi,
@@ -398,6 +407,23 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
                 combined_result.channels_imported,
             )
 
+        unmatched_candidates = {
+            candidate_key
+            for nmi, candidate_key in backfill_candidates.items()
+            if nmi not in paired_interval_nmis
+        }
+        if unmatched_candidates:
+            self.hass.config_entries.async_update_entry(
+                self.config_entry,
+                data={
+                    **self.config_entry.data,
+                    COMBINED_BACKFILL_ATTEMPTS: sorted(
+                        set(self.config_entry.data.get(COMBINED_BACKFILL_ATTEMPTS, []))
+                        | unmatched_candidates
+                    ),
+                },
+            )
+
         return SyncImportStats(
             rows_imported=total_rows,
             channels_imported=total_channels,
@@ -438,6 +464,50 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
         for nmi, points in source.items():
             bucket = target.setdefault(nmi, [])
             bucket.extend(points)
+
+    def _interval_import_points_by_nmi(
+        self,
+        parsed: dict[tuple[str, str], list[IntervalReading]],
+    ) -> dict[str, tuple[tuple[datetime, float], ...]]:
+        """Aggregate detailed import channels into hourly points by NMI."""
+        hourly_totals_by_nmi: dict[str, dict[datetime, float]] = defaultdict(
+            lambda: defaultdict(float)
+        )
+        for (nmi, suffix), readings in parsed.items():
+            if self._channel_direction(suffix) != "import":
+                continue
+            for hour_start, hour_value in self._complete_hourly_totals(
+                readings
+            ).items():
+                hourly_totals_by_nmi[nmi][hour_start] += hour_value
+
+        return {
+            nmi: tuple(sorted(hourly_totals.items()))
+            for nmi, hourly_totals in hourly_totals_by_nmi.items()
+        }
+
+    def _summary_import_points_by_nmi(
+        self,
+        periods: list[SummaryPeriod],
+    ) -> dict[str, tuple[tuple[datetime, float], ...]]:
+        """Convert summary import periods into timestamped points by NMI."""
+        grouped_periods: dict[str, list[SummaryPeriod]] = defaultdict(list)
+        for period in periods:
+            grouped_periods[period.nmi].append(period)
+
+        return {
+            nmi: tuple(
+                (
+                    self._summary_period_timestamp(period.period_end),
+                    period.import_kwh,
+                )
+                for period in sorted(
+                    nmi_periods,
+                    key=lambda item: (item.period_end, item.period_start),
+                )
+            )
+            for nmi, nmi_periods in grouped_periods.items()
+        }
 
     @staticmethod
     def _select_consecutive_stream_pairs(
@@ -510,14 +580,9 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
         total_rows = 0
         total_channels = 0
         statistic_ids: list[str] = []
-        import_hourly_totals_by_nmi: dict[str, dict[datetime, float]] = defaultdict(
-            lambda: defaultdict(float)
-        )
+        import_points_by_nmi = self._interval_import_points_by_nmi(parsed)
         for (nmi, suffix), readings in parsed.items():
             hourly_totals = self._complete_hourly_totals(readings)
-            if self._channel_direction(suffix) == "import":
-                for hour_start, hour_value in hourly_totals.items():
-                    import_hourly_totals_by_nmi[nmi][hour_start] += hour_value
 
             statistic_id = self._statistic_id(nmi, suffix)
             last_start_ts, last_sum = await self._async_last_statistic_snapshot(
@@ -544,19 +609,106 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
             rows_imported=total_rows,
             channels_imported=total_channels,
             statistic_ids=tuple(statistic_ids),
-            import_points_by_nmi={
-                nmi: tuple(sorted(hourly_totals.items()))
-                for nmi, hourly_totals in import_hourly_totals_by_nmi.items()
-            },
+            import_points_by_nmi=import_points_by_nmi,
             latest_interval_data_point=max(
                 (
                     hour_start
-                    for hourly_totals in import_hourly_totals_by_nmi.values()
-                    for hour_start in hourly_totals
+                    for hourly_totals in import_points_by_nmi.values()
+                    for hour_start, _value in hourly_totals
                 ),
                 default=None,
             ),
         )
+
+    async def _async_backfill_combined_source_history(
+        self,
+        assignments: list[NmiAssignment],
+        existing_statistic_ids: set[str],
+        interval_points_by_nmi: dict[str, list[tuple[datetime, float]]],
+        accumulated_points_by_nmi: dict[str, list[tuple[datetime, float]]],
+        fetch_end: datetime,
+    ) -> dict[str, str]:
+        """Load complete existing source history before first combined import."""
+        interval_assignments = [
+            assignment
+            for assignment in assignments
+            if any(
+                statistic_id.startswith(
+                    f"{self._statistic_prefix(assignment.nmi)}import_"
+                )
+                for statistic_id in existing_statistic_ids
+            )
+            and self._combined_statistic_id(assignment.nmi)
+            not in existing_statistic_ids
+        ]
+        accumulated_assignments = [
+            assignment
+            for assignment in assignments
+            if (
+                self._summary_statistic_id(assignment.nmi, "accumulated_import")
+                in existing_statistic_ids
+            )
+        ]
+        if not interval_assignments or not accumulated_assignments:
+            return {}
+
+        accumulated_source_ids = {
+            self._summary_statistic_id(assignment.nmi, "accumulated_import")
+            for assignment in accumulated_assignments
+        }
+        candidate_keys: dict[str, str] = {}
+        for assignment in interval_assignments:
+            source_ids = accumulated_source_ids | {
+                statistic_id
+                for statistic_id in existing_statistic_ids
+                if statistic_id.startswith(
+                    f"{self._statistic_prefix(assignment.nmi)}import_"
+                )
+            }
+            candidate_keys[assignment.nmi] = sha256(
+                "|".join(sorted(source_ids)).encode("utf-8")
+            ).hexdigest()
+        previous_attempts = set(
+            self.config_entry.data.get(COMBINED_BACKFILL_ATTEMPTS, [])
+        )
+        interval_assignments = [
+            assignment
+            for assignment in interval_assignments
+            if candidate_keys[assignment.nmi] not in previous_attempts
+        ]
+        if not interval_assignments:
+            LOGGER.debug("Skipping previously unmatched combined backfill candidates")
+            return {}
+
+        LOGGER.debug(
+            "Backfilling existing source history to initialize combined streams"
+        )
+        for assignment in interval_assignments:
+            raw_csv = await self.client.download_detailed_csv(
+                assignment.nmi,
+                INITIAL_BACKFILL_START,
+                fetch_end,
+            )
+            for nmi, points in self._interval_import_points_by_nmi(
+                parse_nem12_content(raw_csv)
+            ).items():
+                interval_points_by_nmi[nmi] = list(points)
+
+        for assignment in accumulated_assignments:
+            raw_csv = await self.client.download_accumulated_summary_csv(
+                assignment.nmi,
+                INITIAL_BACKFILL_START,
+                fetch_end,
+            )
+            for nmi, points in self._summary_import_points_by_nmi(
+                parse_summary_csv(raw_csv)
+            ).items():
+                accumulated_points_by_nmi[nmi] = list(points)
+
+        return {
+            assignment.nmi: candidate_keys[assignment.nmi]
+            for assignment in interval_assignments
+        }
 
     async def _async_sync_accumulated_statistics(
         self,
@@ -575,23 +727,12 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
         total_rows = 0
         total_channels = 0
         statistic_ids: list[str] = []
-        import_points_by_nmi: dict[str, list[tuple[datetime, float]]] = {}
+        import_points_by_nmi = self._summary_import_points_by_nmi(periods)
         grouped_periods: dict[str, list[SummaryPeriod]] = {}
         for period in periods:
             grouped_periods.setdefault(period.nmi, []).append(period)
 
         for nmi, nmi_periods in grouped_periods.items():
-            import_points_by_nmi[nmi] = [
-                (
-                    self._summary_period_timestamp(period.period_end),
-                    period.import_kwh,
-                )
-                for period in sorted(
-                    nmi_periods,
-                    key=lambda item: (item.period_end, item.period_start),
-                )
-            ]
-
             for direction, direction_periods in (
                 ("accumulated_import", nmi_periods),
                 (
@@ -632,9 +773,7 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
             rows_imported=total_rows,
             channels_imported=total_channels,
             statistic_ids=tuple(statistic_ids),
-            import_points_by_nmi={
-                nmi: tuple(points) for nmi, points in import_points_by_nmi.items()
-            },
+            import_points_by_nmi=import_points_by_nmi,
         )
 
     async def _async_sync_combined_import_statistics(
@@ -790,18 +929,10 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
     ) -> datetime | None:
         """Determine interval fetch start, or skip a known summary-only meter."""
         nmi = assignment.nmi
-        statistic_prefix = self._statistic_prefix(nmi)
-        interval_prefixes = tuple(
-            f"{statistic_prefix}{direction}_"
-            for direction in ("import", "export", "channel")
-        )
         combined_statistic_id = self._combined_statistic_id(nmi)
-        matching_ids = {
-            statistic_id
-            for statistic_id in existing_statistic_ids
-            if statistic_id.startswith(interval_prefixes)
-            or statistic_id == combined_statistic_id
-        }
+        matching_ids = self._interval_statistic_ids(nmi, existing_statistic_ids)
+        if combined_statistic_id in existing_statistic_ids:
+            matching_ids.add(combined_statistic_id)
         if not matching_ids:
             if (
                 assignment.meter_type_description or ""
@@ -825,6 +956,23 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
         if not latest_datetimes:
             return INITIAL_BACKFILL_START
         return min(latest_datetimes) + timedelta(hours=1)
+
+    def _interval_statistic_ids(
+        self,
+        nmi: str,
+        existing_statistic_ids: set[str],
+    ) -> set[str]:
+        """Return existing detailed channel statistic ids for an NMI."""
+        statistic_prefix = self._statistic_prefix(nmi)
+        interval_prefixes = tuple(
+            f"{statistic_prefix}{direction}_"
+            for direction in ("import", "export", "channel")
+        )
+        return {
+            statistic_id
+            for statistic_id in existing_statistic_ids
+            if statistic_id.startswith(interval_prefixes)
+        }
 
     async def _async_accumulated_fetch_start(
         self,

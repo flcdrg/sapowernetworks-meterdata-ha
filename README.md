@@ -62,6 +62,13 @@ Important: this integration currently imports statistics to Recorder and does no
 - Combined stream notes:
   - Combined is import-focused (Combined Import) and is used to give one continuous import history across stream handoff.
   - If a combined stream already exists, new interval import points can continue that stream on later syncs.
+  - When interval and accumulated statistics already exist but the combined stream
+    does not, the first combined import re-fetches available source history to build
+    its baseline. This can require a historical portal download.
+  - Completed historical initialization attempts that find no consecutive streams
+    or usable history are remembered across refreshes and restarts. The full backfill
+    is tried again only when the candidate source statistic IDs change; ordinary
+    incremental imports continue. Failed downloads remain retryable.
 - Partial hours are deferred until a later sync rather than imported as hourly subtotals.
 - Meters identified by the portal as Accumulated skip detailed interval downloads
   unless interval or combined statistics already exist. Interval and unknown meter
