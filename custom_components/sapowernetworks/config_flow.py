@@ -6,7 +6,7 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.helpers import selector
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.aiohttp_client import async_create_clientsession
 
 from .api import (
     SAPowerNetworksApiClient,
@@ -80,12 +80,16 @@ class SAPowerNetworksConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def _test_credentials(self, username: str, password: str) -> None:
         """Validate credentials against the API."""
-        client = SAPowerNetworksApiClient(
-            username=username,
-            password=password,
-            session=async_get_clientsession(self.hass),
-        )
-        await client.test_credentials()
+        session = async_create_clientsession(self.hass, auto_cleanup=False)
+        try:
+            client = SAPowerNetworksApiClient(
+                username=username,
+                password=password,
+                session=session,
+            )
+            await client.test_credentials()
+        finally:
+            session.detach()
 
     async def async_step_reauth(
         self,

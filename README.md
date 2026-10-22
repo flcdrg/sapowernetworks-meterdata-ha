@@ -107,6 +107,10 @@ Recorder is required because this integration writes external statistics directl
 
 No YAML configuration is required.
 
+Multiple portal accounts can be configured. Each entry uses its own HTTP session
+and cookies, which are released when the entry is unloaded. Credential checks
+during setup and reauthentication use separate, temporary sessions.
+
 ## Using The Imported Statistics
 
 Before configuring dashboard cards, verify import health first:
@@ -137,7 +141,9 @@ Because Recorder stores long-term statistics in hourly buckets, interval source 
 
 ### Login works in config flow but setup later fails
 
-The integration now attempts to reuse an already-authenticated Home Assistant HTTP session before doing another login POST. If this still fails, check Home Assistant logs for:
+The integration reuses only the portal session belonging to that config entry.
+Setup logs in independently of the temporary session used to validate credentials.
+If login fails, check Home Assistant logs for:
 
 - HTTP 401/403: credentials rejected
 - HTTP 503: portal unavailable or maintenance page
