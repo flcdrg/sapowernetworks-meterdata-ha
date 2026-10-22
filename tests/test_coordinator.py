@@ -345,6 +345,9 @@ async def test_coordinator_imports_accumulated_statistics(
     assert export_stat_id in by_statistic_id
     assert by_statistic_id[import_stat_id][0]["sum"] == 837.0
     assert by_statistic_id[import_stat_id][1]["sum"] == 1857.0
+    assert by_statistic_id[import_stat_id][0]["start"] == datetime(
+        2024, 12, 11, 14, tzinfo=UTC
+    )
     assert by_statistic_id[export_stat_id][0]["sum"] == 12.5
 
 
@@ -609,7 +612,7 @@ async def test_coordinator_imports_combined_when_streams_are_consecutive(
     client.get_nmi_assignments.return_value = [assignment]
     client.download_detailed_csv.return_value = _sample_detailed_csv_for_nmi_on_day(
         assignment.nmi,
-        "20250319",
+        "20250318",
     )
     client.download_accumulated_summary_csv.return_value = _sample_summary_csv_for_nmi(
         assignment.nmi
@@ -649,7 +652,7 @@ async def test_coordinator_imports_combined_when_streams_are_consecutive(
 
     result = await coordinator._async_update_data()
 
-    assert result["combined_rows_imported"] == 3
+    assert result["combined_rows_imported"] == 2
     assert result["combined_channels_imported"] == 1
     assert len(result["combined_statistic_ids"]) == 1
 
@@ -660,10 +663,48 @@ async def test_coordinator_imports_combined_when_streams_are_consecutive(
             combined_rows = statistics
             break
 
-    assert len(combined_rows) == 3
+    assert len(combined_rows) == 2
     assert combined_rows[0]["sum"] == 837.0
-    assert combined_rows[1]["sum"] == 1857.0
-    assert combined_rows[2]["sum"] == 1859.5
+    assert combined_rows[1]["state"] == 1022.5
+    assert combined_rows[1]["sum"] == 1859.5
+
+
+async def test_combined_import_preserves_accumulated_point_at_handover(
+    hass, mock_config_entry, monkeypatch
+) -> None:
+    """Values at an equal handover timestamp should be combined, not dropped."""
+    mock_config_entry.add_to_hass(hass)
+    coordinator = SAPowerNetworksDataUpdateCoordinator(
+        hass,
+        mock_config_entry,
+        AsyncMock(),
+    )
+    boundary = datetime(2025, 3, 18, 14, tzinfo=UTC)
+    imported: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        coordinator,
+        "_async_last_statistic_snapshot",
+        AsyncMock(return_value=(None, 0.0)),
+    )
+    monkeypatch.setattr(
+        "custom_components.sapowernetworks.coordinator.async_add_external_statistics",
+        lambda _hass, _metadata, statistics: imported.extend(statistics),
+    )
+
+    result = await coordinator._async_sync_combined_import_statistics(
+        "20012345678",
+        (
+            (datetime(2025, 3, 17, 14, tzinfo=UTC), 837.0),
+            (boundary, 1020.0),
+        ),
+        ((boundary, 2.5),),
+    )
+
+    assert result.rows_imported == 2
+    assert imported[0]["sum"] == 837.0
+    assert imported[1]["start"] == boundary
+    assert imported[1]["state"] == 1022.5
+    assert imported[1]["sum"] == 1859.5
 
 
 async def test_coordinator_imports_combined_across_consecutive_nmis(
@@ -695,7 +736,7 @@ async def test_coordinator_imports_combined_across_consecutive_nmis(
         _end: datetime,
     ) -> str:
         if nmi == new_assignment.nmi:
-            return _sample_detailed_csv_for_nmi_on_day(new_assignment.nmi, "20250319")
+            return _sample_detailed_csv_for_nmi_on_day(new_assignment.nmi, "20250318")
         return ""
 
     async def _fake_download_accumulated_summary_csv(
@@ -746,7 +787,7 @@ async def test_coordinator_imports_combined_across_consecutive_nmis(
 
     result = await coordinator._async_update_data()
 
-    assert result["combined_rows_imported"] == 3
+    assert result["combined_rows_imported"] == 2
     assert result["combined_channels_imported"] == 1
     assert len(result["combined_statistic_ids"]) == 1
 
@@ -759,10 +800,10 @@ async def test_coordinator_imports_combined_across_consecutive_nmis(
             combined_rows = statistics
             break
 
-    assert len(combined_rows) == 3
+    assert len(combined_rows) == 2
     assert combined_rows[0]["sum"] == 837.0
-    assert combined_rows[1]["sum"] == 1857.0
-    assert combined_rows[2]["sum"] == 1859.5
+    assert combined_rows[1]["state"] == 1022.5
+    assert combined_rows[1]["sum"] == 1859.5
 
 
 async def test_coordinator_continues_combined_from_interval_when_gap_grows(

@@ -47,8 +47,8 @@ Important: this integration currently imports statistics to Recorder and does no
 - Update cadence: twice daily by default (around 00:30 local Home Assistant time and 10:00 UTC)
 - Manual refresh: use the Refresh Meter Data button or call sapowernetworks.refresh
 - Historical backfill: starts from 2000-01-01 for first import
-- NEM12 interval timestamps are interpreted as AEST (UTC+10, without daylight-saving
-  adjustment) and converted to UTC before import.
+- NEM12 interval timestamps and summary period-end dates are interpreted as AEST
+  (UTC+10, without daylight-saving adjustment) and converted to UTC before import.
 - Data stream meanings:
 
   | Stream      | Typical meter type                                                | Meaning                                                                                                                                                                                           |
@@ -80,14 +80,15 @@ Notes:
 
 ### Existing installations and the timezone correction
 
-**Who this applies to:** installations that imported NEM12 interval statistics before
-upgrading to a release that interprets NEM12 timestamps as AEST. Fresh installations,
-and installations that have not yet imported interval data, do not need this cleanup.
+**Who this applies to:** installations that imported interval or accumulated
+statistics before upgrading to a release that interprets NEM12 timestamps and summary
+period-end dates as AEST. Fresh installations, and installations that have not yet
+imported meter data, do not need this cleanup.
 
 Existing Recorder statistics are not shifted or rebuilt automatically. Previously
-imported interval and combined history therefore remains at its original timestamps;
-newly imported data uses the corrected timestamps. This can leave a discontinuity
-around the upgrade.
+imported interval, accumulated, and combined history therefore remains at its original
+timestamps; newly imported data uses the corrected timestamps. This can leave a
+discontinuity around the upgrade.
 
 If you want to rebuild the history with corrected timestamps:
 
