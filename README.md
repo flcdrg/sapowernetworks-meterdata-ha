@@ -47,6 +47,8 @@ Important: this integration currently imports statistics to Recorder and does no
 - Update cadence: twice daily by default (around 00:30 local Home Assistant time and 10:00 UTC)
 - Manual refresh: use the Refresh Meter Data button or call sapowernetworks.refresh
 - Historical backfill: starts from 2000-01-01 for first import
+- NEM12 interval timestamps are interpreted as AEST (UTC+10, without daylight-saving
+  adjustment) and converted to UTC before import.
 - Data stream meanings:
 
   | Stream      | Typical meter type                                                | Meaning                                                                                                                                                                                           |
@@ -75,6 +77,34 @@ Notes:
 
 - The masked number is the NMI with only the last 4 digits visible.
 - The 12-character segment in statistic_id (abc123def456 above) is a deterministic hash of the NMI, so your value will differ.
+
+### Existing installations and the timezone correction
+
+**Who this applies to:** installations that imported NEM12 interval statistics before
+upgrading to a release that interprets NEM12 timestamps as AEST. Fresh installations,
+and installations that have not yet imported interval data, do not need this cleanup.
+
+Existing Recorder statistics are not shifted or rebuilt automatically. Previously
+imported interval and combined history therefore remains at its original timestamps;
+newly imported data uses the corrected timestamps. This can leave a discontinuity
+around the upgrade.
+
+If you want to rebuild the history with corrected timestamps:
+
+1. Back up the Home Assistant Recorder database.
+2. Unload or disable all SA Power Networks config entries so they cannot import data
+   during cleanup.
+3. Using a supported Recorder statistics cleanup method, clear all statistic IDs
+   beginning with `sapowernetworks:`. Clear interval, accumulated, and combined
+   statistics for every configured account so no existing import checkpoint remains.
+4. Reload the config entries and allow the integration to backfill again.
+
+The integration does not currently provide a built-in reset action. This cleanup
+deletes the integration's historical statistics, and the portal may not provide the
+complete history back to 2000-01-01. Do not proceed unless you have a backup and are
+comfortable with that limitation. Do not edit the Recorder database directly; if you
+do not have a supported way to clear these statistics, contact the integration
+maintainer before attempting a reset.
 
 ## Requirements
 

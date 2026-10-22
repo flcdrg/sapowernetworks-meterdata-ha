@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, timezone
 
 NEM12_HEADER_MIN_FIELDS = 9
 NEM12_INTERVAL_MIN_FIELDS = 4
 SUMMARY_MIN_FIELDS = 10
+NEM12_TIMEZONE = timezone(timedelta(hours=10), name="AEST")
 
 
 @dataclass(frozen=True)
@@ -47,7 +48,9 @@ def parse_nem12_datetime(value: str) -> datetime | None:
     if fmt is None:
         return None
     try:
-        return datetime.strptime(value, fmt).replace(tzinfo=UTC)
+        return (
+            datetime.strptime(value, fmt).replace(tzinfo=NEM12_TIMEZONE).astimezone(UTC)
+        )
     except ValueError:
         return None
 

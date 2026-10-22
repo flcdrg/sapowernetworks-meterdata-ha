@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 from custom_components.sapowernetworks.parsing import (
     parse_nem12_content,
+    parse_nem12_datetime,
     parse_summary_csv,
 )
 
@@ -26,8 +27,8 @@ def test_parse_nem12_thirty_minute_row_count() -> None:
     key = ("20012345678", "E1")
     assert key in parsed
     assert len(parsed[key]) == 48
-    assert parsed[key][0].interval_start == datetime(2026, 6, 20, 0, 0, tzinfo=UTC)
-    assert parsed[key][47].interval_start == datetime(2026, 6, 20, 23, 30, tzinfo=UTC)
+    assert parsed[key][0].interval_start == datetime(2026, 6, 19, 14, 0, tzinfo=UTC)
+    assert parsed[key][47].interval_start == datetime(2026, 6, 20, 13, 30, tzinfo=UTC)
 
 
 def test_parse_nem12_five_minute_row_count() -> None:
@@ -45,6 +46,17 @@ def test_parse_nem12_five_minute_row_count() -> None:
     key = ("20012345678", "E1")
     assert key in parsed
     assert len(parsed[key]) == 288
+
+
+def test_parse_nem12_datetime_converts_fixed_aest_to_utc() -> None:
+    """NEM12 timestamps use AEST year-round, including during daylight saving."""
+    assert parse_nem12_datetime("20260620") == datetime(2026, 6, 19, 14, 0, tzinfo=UTC)
+    assert parse_nem12_datetime("202606201230") == datetime(
+        2026, 6, 20, 2, 30, tzinfo=UTC
+    )
+    assert parse_nem12_datetime("20261220123045") == datetime(
+        2026, 12, 20, 2, 30, 45, tzinfo=UTC
+    )
 
 
 def test_parse_summary_csv_rows() -> None:
