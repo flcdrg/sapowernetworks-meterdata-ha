@@ -6,9 +6,12 @@ import pytest
 from homeassistant.config_entries import SOURCE_REAUTH, SOURCE_USER
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from pytest_homeassistant_custom_component.common import MockConfigEntry
+from yarl import URL
 
 from custom_components.sapowernetworks.api import (
+    SAPowerNetworksApiClient,
     SAPowerNetworksApiClientAuthenticationError,
     SAPowerNetworksApiClientCommunicationError,
     SAPowerNetworksApiClientParseError,
@@ -17,6 +20,54 @@ from custom_components.sapowernetworks.config_flow import SAPowerNetworksConfigF
 from custom_components.sapowernetworks.const import DOMAIN
 
 pytestmark = pytest.mark.asyncio
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        None,
+        SAPowerNetworksApiClientAuthenticationError,
+        SAPowerNetworksApiClientCommunicationError,
+        SAPowerNetworksApiClientParseError,
+    ],
+)
+async def test_credentials_use_isolated_temporary_sessions(
+    hass, monkeypatch, error
+) -> None:
+    """Credential checks cannot replace shared cookies and always close sessions."""
+    portal_url = URL("https://customer.portal.sapowernetworks.com.au")
+    shared_session = async_get_clientsession(hass)
+    shared_session.cookie_jar.update_cookies({"sid": "existing"}, portal_url)
+    sessions = []
+
+    async def _test_credentials(client) -> None:
+        session = client._session
+        sessions.append(session)
+        assert session is not shared_session
+        assert not session.closed
+        assert not session.cookie_jar.filter_cookies(portal_url)
+        session.cookie_jar.update_cookies({"sid": "flow"}, portal_url)
+        if error is not None:
+            msg = "credential validation failed"
+            raise error(msg)
+
+    monkeypatch.setattr(SAPowerNetworksApiClient, "test_credentials", _test_credentials)
+    flow = SAPowerNetworksConfigFlow()
+    flow.hass = hass
+
+    for username in ("first@example.com", "second@example.com"):
+        if error is None:
+            await flow._test_credentials(username, "secret")
+        else:
+            with pytest.raises(error, match="credential validation failed"):
+                await flow._test_credentials(username, "secret")
+        assert sessions[-1].closed
+
+    assert sessions[0] is not sessions[1]
+    assert not shared_session.closed
+    assert (
+        shared_session.cookie_jar.filter_cookies(portal_url)["sid"].value == "existing"
+    )
 
 
 async def test_user_flow_shows_form(hass) -> None:

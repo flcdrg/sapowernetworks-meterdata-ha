@@ -338,7 +338,7 @@ class SAPowerNetworksApiClient:
         self._is_authenticated = True
 
     async def _session_appears_authenticated(self) -> bool:
-        """Check whether the shared HTTP session already has a valid portal login."""
+        """Check whether this client's HTTP session has a valid portal login."""
         dashboard_url = urljoin(PORTAL_BASE_URL + "/meterdata/", CAD_DASHBOARD_PATH)
         try:
             async with self._session.get(
