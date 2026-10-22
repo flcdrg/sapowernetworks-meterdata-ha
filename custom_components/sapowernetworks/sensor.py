@@ -12,6 +12,7 @@ from homeassistant.components.sensor import (
 )
 
 from .entity import SAPowerNetworksEntity
+from .privacy import redact_text
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -127,12 +128,14 @@ class SAPowerNetworksSensor(SAPowerNetworksEntity, SensorEntity):
             and self.coordinator.last_exception is not None
         ):
             exception = self.coordinator.last_exception
-            return str(exception) or type(exception).__name__
+            return redact_text(str(exception)) or type(exception).__name__
 
         data = self.coordinator.data
         if not isinstance(data, dict):
             return None
         value = data.get(self.entity_description.key)
+        if self.entity_description.key == "last_error" and isinstance(value, str):
+            return redact_text(value)
         if isinstance(value, (datetime, str, int, float, bool)):
             return value
         return None
