@@ -7,6 +7,7 @@ LOGGER: Logger = getLogger(__package__)
 
 DOMAIN = "sapowernetworks"
 ATTRIBUTION = "Data provided by SA Power Networks"
+COMBINED_BACKFILL_ATTEMPTS = "combined_backfill_attempts"
 
 INITIAL_BACKFILL_START = datetime(2000, 1, 1, tzinfo=UTC)
 DETAILED_REPORT_MAX_RANGE = timedelta(days=90)
