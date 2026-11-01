@@ -1,2 +1,3 @@
 # Keep this plugin paired with the minimum Home Assistant version in hacs.json.
-pytest-homeassistant-custom-component==0.13.375
+# This compatibility baseline is intentionally excluded from Dependabot updates.
+pytest-homeassistant-custom-component==0.13.340

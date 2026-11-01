@@ -37,6 +37,9 @@ updates:
 
   - package-ecosystem: "uv"
     directory: "/"
+    exclude-paths:
+      # Update this compatibility baseline only when raising the HA minimum.
+      - "tests/requirements-min-ha.txt"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 8
