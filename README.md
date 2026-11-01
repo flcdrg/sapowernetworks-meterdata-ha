@@ -243,6 +243,18 @@ Useful commands from repository root:
 - Start local Home Assistant dev instance: scripts/develop
 - Lint and auto-fix: scripts/lint
 - Run tests: scripts/test
+- Run tests against the minimum supported Home Assistant: scripts/test min-ha
+
+The default test environment follows the current Home Assistant test plugin.
+Dependabot updates direct Python development dependencies together; Home Assistant's
+exact transitive pins are updated through the plugin rather than independently.
+This does not change the minimum supported Home Assistant version in `hacs.json`.
+
+The minimum-version test profile uses an isolated environment and the matching
+plugin pinned in `tests/requirements-min-ha.txt`, not the default lockfile. When
+raising the minimum in `hacs.json`, update that plugin pin to match. Security fixes
+in Home Assistant's pinned dependencies may require a newer Home Assistant release;
+the integration itself does not install these development dependencies.
 
 ## Known Limitations
 
