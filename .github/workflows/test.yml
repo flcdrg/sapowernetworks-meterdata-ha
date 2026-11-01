@@ -38,15 +38,8 @@ jobs:
 
       - name: Run tests (default dependency set)
         if: matrix.profile == 'default'
-        run: uv run pytest
+        run: scripts/test
 
       - name: Run tests (minimum supported Home Assistant)
         if: matrix.profile == 'min-ha'
-        run: |
-          HA_VERSION="$(python - <<'PY'
-          import json
-          from pathlib import Path
-          print(json.loads(Path('hacs.json').read_text())['homeassistant'])
-          PY
-          )"
-          uv run --with "homeassistant==${HA_VERSION}" pytest
+        run: scripts/test min-ha
