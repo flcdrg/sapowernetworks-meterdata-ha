@@ -19,6 +19,7 @@ from .const import (
     CAD_REQUEST_METER_DATA_PATH,
     CAD_SITE_LOGIN_PATH,
     DETAILED_REPORT_MAX_RANGE,
+    INITIAL_BACKFILL_START,
     LOGGER,
     PORTAL_BASE_URL,
     PORTAL_COMPANY,
@@ -72,6 +73,10 @@ class SAPowerNetworksApiClientAuthenticationError(SAPowerNetworksApiClientError)
 
 class SAPowerNetworksApiClientParseError(SAPowerNetworksApiClientError):
     """Exception to indicate unexpected portal page shape."""
+
+
+class SAPowerNetworksApiClientSummaryRetrievalError(SAPowerNetworksApiClientParseError):
+    """Exception for the portal's explicit accumulated data retrieval error."""
 
 
 class SAPowerNetworksApiClient:
@@ -279,11 +284,32 @@ class SAPowerNetworksApiClient:
             end,
             ACCUMULATED_REPORT_MAX_RANGE,
         ):
-            chunk = await self._download_accumulated_summary_csv_form(
-                nmi,
-                block_start,
-                block_end,
-            )
+            try:
+                chunk = await self._download_accumulated_summary_csv_form(
+                    nmi,
+                    block_start,
+                    block_end,
+                )
+            except SAPowerNetworksApiClientSummaryRetrievalError as exception:
+                overlap_start = max(
+                    INITIAL_BACKFILL_START,
+                    block_end - ACCUMULATED_REPORT_MAX_RANGE,
+                )
+                if overlap_start >= block_start:
+                    raise
+                LOGGER.info(
+                    "Retrying accumulated summary with overlapping history: %s to %s",
+                    overlap_start.date(),
+                    block_end.date(),
+                )
+                chunk = await self._download_accumulated_summary_csv_form(
+                    nmi,
+                    overlap_start,
+                    block_end,
+                )
+                if not _is_summary_csv_payload(chunk):
+                    msg = "Overlapping accumulated summary retry returned no valid CSV"
+                    raise SAPowerNetworksApiClientParseError(msg) from exception
             if not chunk.strip():
                 continue
             if not _is_summary_csv_payload(chunk):
@@ -354,7 +380,22 @@ class SAPowerNetworksApiClient:
                 response.status,
                 "form submission",
             )
-            return await response.text()
+            content = await response.text()
+            if content.strip() and not _is_summary_csv_payload(content):
+                content_type = (
+                    response.headers.get("Content-Type", "unknown")
+                    .split(";", maxsplit=1)[0]
+                    .strip()
+                )
+                msg = (
+                    "Unexpected accumulated summary response "
+                    f"(HTTP {response.status}, content type {content_type}, "
+                    f"requested {start:%d/%m/%Y} through {end:%d/%m/%Y})"
+                )
+                if "An error occurred retrieving your data." in content:
+                    raise SAPowerNetworksApiClientSummaryRetrievalError(msg)
+                raise SAPowerNetworksApiClientParseError(msg)
+            return content
 
     def _check_accumulated_summary_response_status(
         self,

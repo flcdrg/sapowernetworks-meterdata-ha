@@ -73,6 +73,10 @@ Important: this integration currently imports statistics to Recorder and does no
 - Meters identified by the portal as Accumulated skip detailed interval downloads
   unless interval or combined statistics already exist. Interval and unknown meter
   types remain eligible for interval backfill, including after a meter handover.
+- If an incremental accumulated-summary request returns the portal's data retrieval
+  error, the integration retries once with up to 730 days of overlapping history.
+  The retry must return valid summary CSV; already imported periods are not added
+  again. Failed retries and other unexpected responses remain sync errors.
 
 Statistic display names begin with SA Power Networks and include direction labels such as Import, Export, Accumulated Import, Accumulated Export, and Combined Import.
 

@@ -15,6 +15,7 @@ from custom_components.sapowernetworks.api import (
     SAPowerNetworksApiClientAuthenticationError,
     SAPowerNetworksApiClientCommunicationError,
     SAPowerNetworksApiClientParseError,
+    SAPowerNetworksApiClientSummaryRetrievalError,
     _is_summary_csv_payload,
     _merge_csv_chunks,
     _merge_nem12_chunks,
@@ -587,6 +588,204 @@ async def test_accumulated_summary_form_http_errors_are_reported(
             datetime(2024, 1, 1, tzinfo=UTC),
             datetime(2024, 2, 1, tzinfo=UTC),
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("portal_message", "expected_error"),
+    [
+        ("No data available", SAPowerNetworksApiClientParseError),
+        (
+            "An error occurred retrieving your data.",
+            SAPowerNetworksApiClientSummaryRetrievalError,
+        ),
+    ],
+)
+async def test_accumulated_summary_form_reports_safe_response_metadata(
+    monkeypatch,
+    caplog,
+    portal_message,
+    expected_error,
+) -> None:
+    """Unexpected form responses should expose HTTP metadata, not response content."""
+    html = (
+        '<input type="hidden" '
+        'name="com.salesforce.visualforce.ViewState" value="view-state">'
+        '<input type="hidden" '
+        'name="com.salesforce.visualforce.ViewStateMAC" value="mac">'
+    )
+
+    class _FakeResponse:
+        def __init__(
+            self,
+            body: str,
+            content_type: str = "text/html; charset=utf-8",
+        ) -> None:
+            self.status = 200
+            self.headers = {"Content-Type": content_type}
+            self._body = body
+
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def text(self) -> str:
+            return self._body
+
+    class _FakeSession:
+        def request(
+            self,
+            method: str,
+            *_args: Any,
+            **_kwargs: Any,
+        ) -> _FakeResponse:
+            if method == "GET":
+                return _FakeResponse(html)
+            return _FakeResponse(
+                '<html><input value="form-secret">'
+                '<script>{"csrf":"script-secret"}</script>'
+                f"<p>{portal_message} for user@example.com</p></html>"
+            )
+
+    fake_secret = "synthetic-test-value"
+    client = SAPowerNetworksApiClient(
+        username="user@example.com",
+        password=fake_secret,
+        session=_FakeSession(),  # type: ignore[arg-type]
+    )
+
+    async def _no_auth_needed() -> None:
+        return None
+
+    monkeypatch.setattr(client, "_ensure_authenticated", _no_auth_needed)
+
+    with pytest.raises(
+        expected_error,
+        match=(
+            r"HTTP 200, content type text/html, "
+            r"requested 01/01/2024 through 01/02/2024"
+        ),
+    ) as exc_info:
+        await client._download_accumulated_summary_csv_form(
+            "20012345678",
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 2, 1, tzinfo=UTC),
+        )
+
+    assert "redacted response HTML:" not in caplog.text
+    assert portal_message not in caplog.text
+    assert "form-secret" not in caplog.text
+    assert "script-secret" not in caplog.text
+    assert "user@example.com" not in caplog.text
+    assert portal_message not in str(exc_info.value)
+    assert "<html>" not in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retry_fails", [False, True])
+async def test_accumulated_summary_retries_retrieval_error_with_overlap(
+    monkeypatch, *, retry_fails: bool
+) -> None:
+    """An empty incremental window needs valid overlapping CSV, not silent success."""
+    fake_secret = "synthetic-test-value"
+    client = SAPowerNetworksApiClient(
+        username="user@example.com",
+        password=fake_secret,
+        session=None,  # type: ignore[arg-type]
+    )
+    start = datetime(2026, 6, 20, tzinfo=UTC)
+    end = datetime(2026, 11, 1, tzinfo=UTC)
+    calls: list[tuple[datetime, datetime]] = []
+    payload = "20012345678,1180281,kWh,A,18/03/2026,19/06/2026,100,0,100,NN"
+
+    async def _fake_form(_nmi: str, block_start: datetime, block_end: datetime) -> str:
+        calls.append((block_start, block_end))
+        if len(calls) == 1 or retry_fails:
+            msg = "retrieval failed"
+            raise SAPowerNetworksApiClientSummaryRetrievalError(msg)
+        return payload
+
+    monkeypatch.setattr(client, "_download_accumulated_summary_csv_form", _fake_form)
+
+    if retry_fails:
+        with pytest.raises(SAPowerNetworksApiClientSummaryRetrievalError):
+            await client._download_accumulated_summary_csv_form_chunked(
+                "20012345678", start, end
+            )
+    else:
+        result = await client._download_accumulated_summary_csv_form_chunked(
+            "20012345678", start, end
+        )
+        assert result == payload
+
+    assert calls == [
+        (start, end),
+        (end - ACCUMULATED_REPORT_MAX_RANGE, end),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retry_payload", ["", "<html>Unexpected response</html>"])
+async def test_accumulated_summary_overlap_requires_valid_csv(
+    monkeypatch, retry_payload: str
+) -> None:
+    """An empty or unexpected retry must not turn a failed sync into success."""
+    fake_secret = "synthetic-test-value"
+    client = SAPowerNetworksApiClient(
+        username="user@example.com",
+        password=fake_secret,
+        session=None,  # type: ignore[arg-type]
+    )
+    calls = 0
+
+    async def _fake_form(*_args: Any) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            msg = "retrieval failed"
+            raise SAPowerNetworksApiClientSummaryRetrievalError(msg)
+        return retry_payload
+
+    monkeypatch.setattr(client, "_download_accumulated_summary_csv_form", _fake_form)
+    with pytest.raises(
+        SAPowerNetworksApiClientParseError, match="retry returned no valid CSV"
+    ):
+        await client._download_accumulated_summary_csv_form_chunked(
+            "20012345678",
+            datetime(2026, 6, 20, tzinfo=UTC),
+            datetime(2026, 11, 1, tzinfo=UTC),
+        )
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_accumulated_summary_full_window_does_not_retry_retrieval_error(
+    monkeypatch,
+) -> None:
+    """A failing full history window cannot be broadened beyond the portal limit."""
+    fake_secret = "synthetic-test-value"
+    client = SAPowerNetworksApiClient(
+        username="user@example.com",
+        password=fake_secret,
+        session=None,  # type: ignore[arg-type]
+    )
+    calls = 0
+
+    async def _fake_form(*_args: Any) -> str:
+        nonlocal calls
+        calls += 1
+        msg = "retrieval failed"
+        raise SAPowerNetworksApiClientSummaryRetrievalError(msg)
+
+    monkeypatch.setattr(client, "_download_accumulated_summary_csv_form", _fake_form)
+    end = datetime(2026, 11, 1, tzinfo=UTC)
+    with pytest.raises(SAPowerNetworksApiClientSummaryRetrievalError):
+        await client._download_accumulated_summary_csv_form_chunked(
+            "20012345678", end - ACCUMULATED_REPORT_MAX_RANGE, end
+        )
+    assert calls == 1
 
 
 @pytest.mark.asyncio
