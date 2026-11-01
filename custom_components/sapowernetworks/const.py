@@ -27,3 +27,13 @@ REPORT_TYPE_SUMMARY_CSV = "Summary Format (CSV)"
 REPORT_DATA_SET_NEM12 = "Customer Access NEM12"
 
 STATISTIC_NAME_PREFIX = "SA Power Networks"
+
+STATISTICS_MIGRATION = "statistics_migration"
+STATISTICS_MIGRATION_PENDING_DIGESTS = "statistics_migration_pending"
+STATISTICS_MIGRATION_COMPLETED_DIGESTS = "statistics_migration_completed"
+STATISTICS_MIGRATION_CHECK = "check"
+STATISTICS_MIGRATION_PENDING = "pending"
+STATISTICS_MIGRATION_DONE = "done"
+LEGACY_STATISTICS_ISSUE_PREFIX = "legacy_statistics_"
+LEGACY_STATISTICS_TRANSLATION_KEY = "legacy_statistics"
+DATA_STATISTICS_REBUILD_LOCKS = "statistics_rebuild_locks"

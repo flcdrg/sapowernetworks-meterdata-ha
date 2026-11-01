@@ -8,7 +8,11 @@ import pytest
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.sapowernetworks.const import DOMAIN
+from custom_components.sapowernetworks.const import (
+    DOMAIN,
+    STATISTICS_MIGRATION,
+    STATISTICS_MIGRATION_DONE,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -26,8 +30,10 @@ def mock_config_entry() -> MockConfigEntry:
         domain=DOMAIN,
         title="Test User",
         unique_id="test-user",
+        minor_version=2,
         data={
             CONF_USERNAME: "user@example.com",
             CONF_PASSWORD: "secret",
+            STATISTICS_MIGRATION: STATISTICS_MIGRATION_DONE,
         },
     )

@@ -24,5 +24,40 @@
         "abort": {
             "already_configured": "This entry is already configured."
         }
+    },
+    "issues": {
+        "legacy_statistics": {
+            "title": "Rebuild energy statistics for NMI {nmi}",
+            "fix_flow": {
+                "step": {
+                    "init": {
+                        "title": "Legacy energy statistics found for NMI {nmi}",
+                        "description": "Earlier releases of this integration stored energy statistics for NMI {nmi} with incorrect time zone handling and could skip some hours, so the stored running totals may be wrong. New statistics imports for this NMI are paused until you choose what to do.",
+                        "menu_options": {
+                            "rebuild": "Clear and rebuild statistics from the portal (recommended)",
+                            "keep": "Keep existing statistics and resume imports"
+                        }
+                    },
+                    "rebuild": {
+                        "title": "Clear and rebuild statistics for NMI {nmi}",
+                        "description": "All SA Power Networks statistics for NMI {nmi} will be deleted from the Home Assistant database and imported again from the full portal history. Back up your Home Assistant database before continuing. The portal may not provide history back to 2000, so any older data that is no longer available will not be restored. Nothing is deleted if the download fails or returns no replacement data. This can take several minutes."
+                    },
+                    "rebuild_failed": {
+                        "title": "Rebuild failed for NMI {nmi}",
+                        "description": "Rebuilding statistics failed. No stored statistics were deleted. Check the Home Assistant log for details, then submit this form to retry."
+                    },
+                    "keep": {
+                        "title": "Keep existing statistics for NMI {nmi}",
+                        "description": "Existing statistics for NMI {nmi} will be kept as they are and imports will resume from the latest stored value. Any incorrect historical totals will remain."
+                    }
+                },
+                "progress": {
+                    "rebuild": "Downloading the full history for NMI {nmi} and rebuilding statistics. This can take several minutes."
+                },
+                "error": {
+                    "rebuild_failed": "Rebuilding statistics failed. Check the Home Assistant log for details, then try again."
+                }
+            }
+        }
     }
 }
