@@ -8,7 +8,12 @@ from homeassistant.const import CONF_PASSWORD, CONF_USERNAME, Platform
 from homeassistant.helpers.aiohttp_client import async_create_clientsession
 
 from .api import SAPowerNetworksApiClient
-from .const import DOMAIN
+from .const import (
+    DOMAIN,
+    LOGGER,
+    STATISTICS_MIGRATION,
+    STATISTICS_MIGRATION_CHECK,
+)
 from .coordinator import SAPowerNetworksDataUpdateCoordinator
 
 if TYPE_CHECKING:
@@ -36,6 +41,25 @@ PLATFORMS: list[Platform] = [
     Platform.BUTTON,
     Platform.SENSOR,
 ]
+
+
+async def async_migrate_entry(
+    hass: HomeAssistant,
+    entry: SAPowerNetworksConfigEntry,
+) -> bool:
+    """Migrate old config entries."""
+    if entry.version > 1:
+        return False
+
+    if entry.minor_version < 2:  # noqa: PLR2004
+        hass.config_entries.async_update_entry(
+            entry,
+            data={**entry.data, STATISTICS_MIGRATION: STATISTICS_MIGRATION_CHECK},
+            minor_version=2,
+        )
+        LOGGER.debug("Migrated config entry to version 1.2")
+
+    return True
 
 
 async def async_setup_entry(

@@ -459,8 +459,9 @@ async def test_download_accumulated_summary_uses_rpc_when_summary_is_valid(
 @pytest.mark.asyncio
 async def test_download_accumulated_summary_chunks_form_fallback(
     monkeypatch,
+    caplog,
 ) -> None:
-    """Accumulated form fallback should split large ranges into bounded windows."""
+    """A rejected full-range request should fall back to bounded windows."""
     fake_secret = "synthetic-test-value"
     client = SAPowerNetworksApiClient(
         username="user@example.com",
@@ -487,7 +488,10 @@ async def test_download_accumulated_summary_chunks_form_fallback(
         block_end: datetime,
     ) -> str:
         calls.append((block_start, block_end))
-        return chunks[len(calls) - 1]
+        if len(calls) == 1:
+            msg = "retrieval failed"
+            raise SAPowerNetworksApiClientSummaryRetrievalError(msg)
+        return chunks[len(calls) - 2]
 
     monkeypatch.setattr(client, "_data_from_method", _fake_data_from_method)
     monkeypatch.setattr(
@@ -496,16 +500,99 @@ async def test_download_accumulated_summary_chunks_form_fallback(
         _fake_form,
     )
 
-    result = await client.download_accumulated_summary_csv(
-        "20012345678",
-        start,
-        end,
-    )
+    with caplog.at_level("INFO"):
+        result = await client.download_accumulated_summary_csv(
+            "20012345678",
+            start,
+            end,
+        )
 
-    assert len(calls) == 2
-    assert calls[0] == (start, start + ACCUMULATED_REPORT_MAX_RANGE)
-    assert calls[1] == (start + ACCUMULATED_REPORT_MAX_RANGE, end)
+    assert len(calls) == 3
+    assert calls[0] == (start, end)
+    assert calls[1] == (start, start + ACCUMULATED_REPORT_MAX_RANGE)
+    assert calls[2] == (start + ACCUMULATED_REPORT_MAX_RANGE, end)
     assert result.count("20012345678") == 2
+    assert "retrying with bounded windows" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_download_accumulated_summary_full_history_avoids_empty_old_windows(
+    monkeypatch,
+) -> None:
+    """A valid full-history report must not be blocked by an empty early window."""
+    fake_secret = "synthetic-test-value"
+    client = SAPowerNetworksApiClient(
+        username="user@example.com",
+        password=fake_secret,
+        session=None,  # type: ignore[arg-type]
+    )
+    start = datetime(2000, 1, 1, tzinfo=UTC)
+    end = datetime(2026, 11, 1, tzinfo=UTC)
+    payload = "20012345678,1180281,kWh,A,18/03/2026,19/06/2026,100,0,100,NN"
+    calls: list[tuple[datetime, datetime]] = []
+
+    async def _fake_rpc(**_kwargs: Any) -> list[dict[str, dict[str, str]]]:
+        return [{"result": {"results": "200,not-summary"}}]
+
+    async def _fake_form(_nmi: str, block_start: datetime, block_end: datetime) -> str:
+        calls.append((block_start, block_end))
+        if (block_start, block_end) != (start, end):
+            msg = (
+                "Unexpected accumulated summary response "
+                "(historical window has no data)"
+            )
+            raise SAPowerNetworksApiClientParseError(msg)
+        return payload
+
+    monkeypatch.setattr(client, "_data_from_method", _fake_rpc)
+    monkeypatch.setattr(client, "_download_accumulated_summary_csv_form", _fake_form)
+
+    result = await client.download_accumulated_summary_csv("20012345678", start, end)
+
+    assert result == payload
+    assert calls == [(start, end)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error_type",
+    [
+        SAPowerNetworksApiClientAuthenticationError,
+        SAPowerNetworksApiClientCommunicationError,
+        SAPowerNetworksApiClientParseError,
+    ],
+)
+async def test_download_accumulated_summary_full_history_preserves_errors(
+    monkeypatch, error_type: type[Exception]
+) -> None:
+    """Unexpected full-history responses must not be hidden by chunk retries."""
+    fake_secret = "synthetic-test-value"
+    client = SAPowerNetworksApiClient(
+        username="user@example.com",
+        password=fake_secret,
+        session=None,  # type: ignore[arg-type]
+    )
+    start = datetime(2000, 1, 1, tzinfo=UTC)
+    end = datetime(2026, 11, 1, tzinfo=UTC)
+    calls: list[tuple[datetime, datetime]] = []
+
+    async def _fake_rpc(**_kwargs: Any) -> list[dict[str, dict[str, str]]]:
+        return [{"result": {"results": "200,not-summary"}}]
+
+    async def _fake_form(
+        _nmi: str, block_start: datetime, block_end: datetime
+    ) -> Never:
+        calls.append((block_start, block_end))
+        msg = "full history request failed"
+        raise error_type(msg)
+
+    monkeypatch.setattr(client, "_data_from_method", _fake_rpc)
+    monkeypatch.setattr(client, "_download_accumulated_summary_csv_form", _fake_form)
+
+    with pytest.raises(error_type, match="full history request failed"):
+        await client.download_accumulated_summary_csv("20012345678", start, end)
+
+    assert calls == [(start, end)]
 
 
 @pytest.mark.asyncio

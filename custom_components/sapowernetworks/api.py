@@ -265,6 +265,21 @@ class SAPowerNetworksApiClient:
         except SAPowerNetworksApiClientError:
             pass
 
+        if end - start > ACCUMULATED_REPORT_MAX_RANGE:
+            try:
+                return await self._download_accumulated_summary_csv_form(
+                    nmi,
+                    start,
+                    end,
+                )
+            except SAPowerNetworksApiClientSummaryRetrievalError:
+                LOGGER.info(
+                    "Full-range accumulated summary retrieval failed; "
+                    "retrying with bounded windows: %s to %s",
+                    start.date(),
+                    end.date(),
+                )
+
         return await self._download_accumulated_summary_csv_form_chunked(
             nmi,
             start,

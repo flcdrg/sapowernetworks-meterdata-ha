@@ -67,8 +67,9 @@ Important: this integration currently imports statistics to Recorder and does no
     its baseline. This can require a historical portal download.
   - Completed historical initialization attempts that find no consecutive streams
     or usable history are remembered across refreshes and restarts. The full backfill
-    is tried again only when the candidate source statistic IDs change; ordinary
-    incremental imports continue. Failed downloads remain retryable.
+    is tried again only when the candidate source statistic IDs change or after a
+    statistics rebuild from Repairs; ordinary incremental imports continue. Failed
+    downloads remain retryable.
 - Partial hours are deferred until a later sync rather than imported as hourly subtotals.
 - Meters identified by the portal as Accumulated skip detailed interval downloads
   unless interval or combined statistics already exist. Interval and unknown meter
@@ -77,6 +78,11 @@ Important: this integration currently imports statistics to Recorder and does no
   error, the integration retries once with up to 730 days of overlapping history.
   The retry must return valid summary CSV; already imported periods are not added
   again. Failed retries and other unexpected responses remain sync errors.
+- Large accumulated-summary backfills try a single full-range form request first,
+  so empty windows before the available history do not block a valid report. If
+  the portal reports a retrieval error for that request, the integration falls
+  back to 730-day windows. Unexpected responses still fail before a rebuild
+  deletes any stored statistics.
 
 Statistic display names begin with SA Power Networks and include direction labels such as Import, Export, Accumulated Import, Accumulated Export, and Combined Import.
 
@@ -98,31 +104,34 @@ Notes:
 ### Existing installations and the timezone correction
 
 **Who this applies to:** installations that imported interval or accumulated
-statistics before upgrading to a release that interprets NEM12 timestamps and summary
-period-end dates as AEST. Fresh installations, and installations that have not yet
-imported meter data, do not need this cleanup.
+statistics with an earlier release, before NEM12 timestamps and summary period-end
+dates were interpreted as AEST. Earlier releases could also import partially covered
+hours as hourly subtotals, which left running totals (sums) undercounted. Fresh
+installations, and installations that have not yet imported meter data, are not
+affected.
 
-Existing Recorder statistics are not shifted or rebuilt automatically. Previously
-imported interval, accumulated, and combined history therefore remains at its original
-timestamps; newly imported data uses the corrected timestamps. This can leave a
-discontinuity around the upgrade.
+Config entries created by earlier releases are migrated automatically and checked at
+the next refresh. If Recorder already holds `sapowernetworks:` statistics for an NMI,
+statistics imports for that NMI are paused (status sensors keep updating) and a
+Repairs issue titled **Rebuild energy statistics for NMI …** (with the NMI masked)
+appears for each affected NMI under Settings -> System -> Repairs. Select the issue and choose one of:
 
-If you want to rebuild the history with corrected timestamps:
+- **Clear and rebuild statistics from the portal (recommended)**: after you confirm,
+  the integration downloads the full interval and summary history from 2000-01-01
+  and validates it before deleting anything. It then clears and rebuilds that NMI's
+  interval, accumulated, and combined statistics from zero, using the corrected
+  timestamps and complete hours. The rebuild applies to every configured account
+  that shares the NMI and can take several minutes. If the download fails or returns
+  no replacement data, nothing is deleted and the Repairs issue stays so you can try
+  again; check the Home Assistant log for details.
+- **Keep existing statistics and resume imports**: imports resume from the latest
+  stored value. Previously imported history stays at its original timestamps and
+  sums, so a discontinuity around the upgrade and any undercounted totals remain.
 
-1. Back up the Home Assistant Recorder database.
-2. Unload or disable all SA Power Networks config entries so they cannot import data
-   during cleanup.
-3. Using a supported Recorder statistics cleanup method, clear all statistic IDs
-   beginning with `sapowernetworks:`. Clear interval, accumulated, and combined
-   statistics for every configured account so no existing import checkpoint remains.
-4. Reload the config entries and allow the integration to backfill again.
-
-The integration does not currently provide a built-in reset action. This cleanup
-deletes the integration's historical statistics, and the portal may not provide the
-complete history back to 2000-01-01. Do not proceed unless you have a backup and are
-comfortable with that limitation. Do not edit the Recorder database directly; if you
-do not have a supported way to clear these statistics, contact the integration
-maintainer before attempting a reset.
+Back up your Home Assistant database before rebuilding. The rebuild deletes the
+integration's historical statistics for that NMI, and the portal may not provide the
+complete history back to 2000-01-01, so older data that is no longer available will
+not be restored. Do not edit the Recorder database directly.
 
 ## Requirements
 
@@ -203,13 +212,16 @@ If login fails, check Home Assistant logs for:
 - Trigger a manual refresh using the button or service
 - Confirm Recorder is enabled and healthy
 - Wait for first backfill/import to complete
+- Check Settings -> System -> Repairs for a pending SA Power Networks statistics
+  issue; imports for that NMI are paused until it is resolved
 
 ### Last Error has content
 
 The Last Error sensor redacts sensitive message content, stays available after a
 failed refresh, and clears after a successful refresh. Open Home Assistant logs and
 diagnostics for the config entry for more detail. Diagnostics redact sensitive
-fields such as credentials and account identifiers.
+fields such as credentials and account identifiers. Diagnostics also show the
+statistics migration state and how many NMIs are waiting on a Repairs decision.
 
 ## Privacy And Diagnostics
 

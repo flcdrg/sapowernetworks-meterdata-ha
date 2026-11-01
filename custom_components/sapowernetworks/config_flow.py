@@ -15,13 +15,19 @@ from .api import (
     SAPowerNetworksApiClientError,
     SAPowerNetworksApiClientParseError,
 )
-from .const import DOMAIN, LOGGER
+from .const import (
+    DOMAIN,
+    LOGGER,
+    STATISTICS_MIGRATION,
+    STATISTICS_MIGRATION_DONE,
+)
 
 
 class SAPowerNetworksConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Config flow for SA Power Networks."""
 
     VERSION = 1
+    MINOR_VERSION = 2
 
     async def async_step_user(
         self,
@@ -53,7 +59,10 @@ class SAPowerNetworksConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._abort_if_unique_id_configured()
                 return self.async_create_entry(
                     title=user_input[CONF_USERNAME],
-                    data=user_input,
+                    data={
+                        **user_input,
+                        STATISTICS_MIGRATION: STATISTICS_MIGRATION_DONE,
+                    },
                 )
 
         return self.async_show_form(

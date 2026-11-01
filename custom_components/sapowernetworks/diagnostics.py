@@ -5,6 +5,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from .privacy import redact_mapping
+from .statistics_migration import (
+    entry_pending_statistics_digests,
+    entry_statistics_migration_state,
+)
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -35,5 +39,10 @@ async def async_get_config_entry_diagnostics(
             "last_exception_type": last_exception_type,
             "has_data": coordinator.data is not None,
             "update_interval_seconds": update_interval_seconds,
+        },
+        "statistics_migration": {
+            "state": entry_statistics_migration_state(config_entry),
+            "pending": bool(entry_pending_statistics_digests(config_entry)),
+            "pending_count": len(entry_pending_statistics_digests(config_entry)),
         },
     }

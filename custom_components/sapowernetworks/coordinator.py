@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from collections import defaultdict
 from dataclasses import dataclass
@@ -42,6 +43,11 @@ from .const import (
     LOCAL_REFRESH_TIME,
     LOGGER,
     STATISTIC_NAME_PREFIX,
+    STATISTICS_MIGRATION,
+    STATISTICS_MIGRATION_CHECK,
+    STATISTICS_MIGRATION_DONE,
+    STATISTICS_MIGRATION_PENDING,
+    STATISTICS_MIGRATION_PENDING_DIGESTS,
     UTC_REFRESH_TIME,
 )
 from .parsing import (
@@ -53,6 +59,17 @@ from .parsing import (
     parse_summary_csv,
 )
 from .privacy import mask_identifier
+from .statistics_migration import (
+    async_complete_statistics_migration,
+    async_create_legacy_statistics_issue,
+    completed_statistics_digests,
+    entry_pending_statistics_digests,
+    entry_statistics_migration_state,
+    get_statistics_rebuild_lock,
+    pending_statistics_digests,
+    statistic_digest,
+    statistic_digest_prefix,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -91,6 +108,27 @@ class ImportBatchResult:
     latest_interval_data_point: datetime | None = None
 
 
+PreparedStatistics = tuple[StatisticMetaData, list[StatisticData]]
+
+STATISTICS_CLEAR_TIMEOUT_SECONDS = 600
+
+
+class StatisticsRebuildError(Exception):
+    """Raised when a legacy statistics rebuild cannot run safely."""
+
+
+@dataclass(frozen=True)
+class StatisticsRebuildResult:
+    """Result of rebuilding all statistics for one NMI digest."""
+
+    digest: str
+    cleared_statistic_ids: tuple[str, ...] = ()
+    interval_statistic_ids: tuple[str, ...] = ()
+    accumulated_statistic_ids: tuple[str, ...] = ()
+    combined_statistic_ids: tuple[str, ...] = ()
+    rows_imported: int = 0
+
+
 class CombinedStreamPair(TypedDict):
     """Matched accumulated and interval streams that can be combined."""
 
@@ -119,6 +157,8 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
         )
         self.config_entry = config_entry
         self.client = client
+        # Serializes portal sessions: the client shares cookies and form view state.
+        self._portal_lock = asyncio.Lock()
         self._scheduled_refresh_unsubscribers: list[Callable[[], None]] = []
 
     def async_setup_scheduled_refreshes(self) -> None:
@@ -161,15 +201,272 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
         LOGGER.debug("Running scheduled refresh at %s", now.isoformat())
         await self.async_request_refresh()
 
+    async def async_rebuild_statistics(self, digest: str) -> StatisticsRebuildResult:
+        """Clear and rebuild every statistic stream for one NMI digest."""
+        async with get_statistics_rebuild_lock(self.hass, digest), self._portal_lock:
+            result = await self._async_rebuild_statistics_locked(digest)
+            async_complete_statistics_migration(
+                self.hass,
+                digest,
+                reset_backfill_attempts=True,
+            )
+        return result
+
+    async def _async_rebuild_statistics_locked(
+        self,
+        digest: str,
+    ) -> StatisticsRebuildResult:
+        """Download full history, validate it, then replace stored statistics."""
+        assignments = await self.client.get_nmi_assignments()
+        target = next(
+            (item for item in assignments if statistic_digest(item.nmi) == digest),
+            None,
+        )
+        if target is None:
+            msg = "The NMI for this statistics rebuild is not assigned to the account"
+            raise StatisticsRebuildError(msg)
+
+        masked_nmi = mask_identifier(target.nmi)
+        prefix = statistic_digest_prefix(digest)
+        existing_ids = sorted(
+            statistic_id
+            for statistic_id in await self._async_existing_statistic_ids()
+            if statistic_id.startswith(prefix)
+        )
+        fetch_end = datetime.now(tz=UTC)
+        LOGGER.info(
+            "Rebuilding statistics for %s from %s",
+            masked_nmi,
+            INITIAL_BACKFILL_START.date().isoformat(),
+        )
+
+        has_interval_history = bool(
+            self._interval_statistic_ids(target.nmi, set(existing_ids))
+        ) or (self._combined_statistic_id(target.nmi) in existing_ids)
+        is_accumulated_meter = (
+            target.meter_type_description or ""
+        ).strip().casefold() == "accumulated"
+        interval_parsed: dict[tuple[str, str], list[IntervalReading]] = {}
+        if has_interval_history or not is_accumulated_meter:
+            raw_csv = await self.client.download_detailed_csv(
+                target.nmi,
+                INITIAL_BACKFILL_START,
+                fetch_end,
+            )
+            interval_parsed = {
+                key: readings
+                for key, readings in parse_nem12_content(raw_csv).items()
+                if statistic_digest(key[0]) == digest
+            }
+        raw_csv = await self.client.download_accumulated_summary_csv(
+            target.nmi,
+            INITIAL_BACKFILL_START,
+            fetch_end,
+        )
+        periods = [
+            period
+            for period in parse_summary_csv(raw_csv)
+            if statistic_digest(period.nmi) == digest
+        ]
+
+        pair = await self._async_rebuild_combined_pair(
+            digest,
+            assignments,
+            interval_parsed,
+            periods,
+            fetch_end,
+        )
+        interval_prepared = await self._async_prepare_interval_statistics(
+            interval_parsed,
+            from_scratch=True,
+        )
+        accumulated_prepared = await self._async_prepare_accumulated_statistics(
+            periods,
+            from_scratch=True,
+        )
+        combined_prepared: list[PreparedStatistics] = []
+        if pair is not None:
+            prepared = await self._async_prepare_combined_statistics(
+                pair["combined_nmi"],
+                pair["accumulated_points"],
+                pair["interval_points"],
+                from_scratch=True,
+            )
+            if prepared is not None:
+                combined_prepared.append(prepared)
+
+        self._validate_rebuild_replacement(
+            digest,
+            existing_ids,
+            interval_prepared,
+            accumulated_prepared,
+            combined_prepared,
+        )
+
+        if existing_ids:
+            await self._async_clear_statistics(existing_ids)
+        interval_result = self._write_statistics(interval_prepared)
+        accumulated_result = self._write_statistics(accumulated_prepared)
+        combined_result = self._write_statistics(combined_prepared)
+        rows_imported = (
+            interval_result.rows_imported
+            + accumulated_result.rows_imported
+            + combined_result.rows_imported
+        )
+        LOGGER.info(
+            "Rebuilt statistics for %s: cleared=%s rows=%s",
+            masked_nmi,
+            len(existing_ids),
+            rows_imported,
+        )
+        return StatisticsRebuildResult(
+            digest=digest,
+            cleared_statistic_ids=tuple(existing_ids),
+            interval_statistic_ids=interval_result.statistic_ids,
+            accumulated_statistic_ids=accumulated_result.statistic_ids,
+            combined_statistic_ids=combined_result.statistic_ids,
+            rows_imported=rows_imported,
+        )
+
+    async def _async_rebuild_combined_pair(
+        self,
+        digest: str,
+        assignments: list[NmiAssignment],
+        interval_parsed: dict[tuple[str, str], list[IntervalReading]],
+        periods: list[SummaryPeriod],
+        fetch_end: datetime,
+    ) -> CombinedStreamPair | None:
+        """Find the accumulated stream that continues into this digest's intervals."""
+        interval_points_by_nmi = {
+            nmi: list(points)
+            for nmi, points in self._interval_import_points_by_nmi(
+                interval_parsed
+            ).items()
+        }
+        if not interval_points_by_nmi:
+            return None
+        accumulated_points_by_nmi = {
+            nmi: list(points)
+            for nmi, points in self._summary_import_points_by_nmi(periods).items()
+        }
+
+        def _select() -> CombinedStreamPair | None:
+            return next(
+                (
+                    pair
+                    for pair in self._select_consecutive_stream_pairs(
+                        accumulated_points_by_nmi,
+                        interval_points_by_nmi,
+                    )
+                    if statistic_digest(pair["combined_nmi"]) == digest
+                ),
+                None,
+            )
+
+        pair = _select()
+        other_assignments = [
+            item for item in assignments if statistic_digest(item.nmi) != digest
+        ]
+        if pair is not None or not other_assignments:
+            return pair
+
+        for assignment in other_assignments:
+            raw_csv = await self.client.download_accumulated_summary_csv(
+                assignment.nmi,
+                INITIAL_BACKFILL_START,
+                fetch_end,
+            )
+            for nmi, points in self._summary_import_points_by_nmi(
+                parse_summary_csv(raw_csv)
+            ).items():
+                if statistic_digest(nmi) != digest:
+                    accumulated_points_by_nmi[nmi] = list(points)
+        return _select()
+
+    @staticmethod
+    def _validate_rebuild_replacement(
+        digest: str,
+        existing_ids: list[str],
+        interval_prepared: list[PreparedStatistics],
+        accumulated_prepared: list[PreparedStatistics],
+        combined_prepared: list[PreparedStatistics],
+    ) -> None:
+        """Refuse to clear stored statistics that cannot be fully replaced."""
+        prefix = statistic_digest_prefix(digest)
+        stream_types = (
+            (
+                "interval",
+                tuple(f"{prefix}{item}_" for item in ("import", "export", "channel")),
+                interval_prepared,
+            ),
+            ("accumulated", (f"{prefix}accumulated_",), accumulated_prepared),
+            ("combined", (f"{prefix}combined_import",), combined_prepared),
+        )
+        missing = [
+            name
+            for name, prefixes, prepared in stream_types
+            if any(statistic_id.startswith(prefixes) for statistic_id in existing_ids)
+            and not prepared
+        ]
+        if missing:
+            msg = (
+                "Downloaded history has no replacement data for stored "
+                f"{', '.join(missing)} statistics; nothing was cleared"
+            )
+            raise StatisticsRebuildError(msg)
+        if not (interval_prepared or accumulated_prepared or combined_prepared):
+            msg = "Downloaded history contains no statistics; nothing was cleared"
+            raise StatisticsRebuildError(msg)
+
+    async def _async_clear_statistics(self, statistic_ids: list[str]) -> None:
+        """Clear recorder statistics and wait for the recorder to finish."""
+        loop = self.hass.loop
+        future: asyncio.Future[None] = loop.create_future()
+
+        def _resolve() -> None:
+            if not future.done():
+                future.set_result(None)
+
+        def _on_done() -> None:
+            # Called from the recorder thread.
+            loop.call_soon_threadsafe(_resolve)
+
+        get_instance(self.hass).async_clear_statistics(
+            list(statistic_ids),
+            on_done=_on_done,
+        )
+        try:
+            async with asyncio.timeout(STATISTICS_CLEAR_TIMEOUT_SECONDS):
+                await future
+        except TimeoutError as exception:
+            msg = "Timed out waiting for the recorder to clear statistics"
+            raise StatisticsRebuildError(msg) from exception
+
     async def _async_update_data(self) -> Any:
         """Update data via library."""
+        async with self._portal_lock:
+            return await self._async_update_data_unlocked()
+
+    async def _async_update_data_unlocked(self) -> Any:
+        """Refresh portal data while the portal session is held."""
         try:
             LOGGER.debug("Coordinator refresh started")
             assignments = await self.client.get_nmi_assignments()
             LOGGER.debug(
                 "Fetched NMI assignments", extra={"nmi_count": len(assignments)}
             )
-            import_stats = await self._async_sync_statistics(assignments)
+            await self._async_check_legacy_statistics(assignments)
+            active_assignments, held_locks = await self._async_acquire_sync_locks(
+                assignments
+            )
+            try:
+                import_stats = await self._async_sync_statistics(active_assignments)
+            finally:
+                for lock in held_locks:
+                    lock.release()
+            paused_nmis = [
+                item.nmi for item in assignments if item not in active_assignments
+            ]
             feed_lag_hours: float | None = None
             if import_stats.latest_interval_data_point is not None:
                 lag_seconds = (
@@ -209,6 +506,8 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
                 "combined_statistic_ids": list(import_stats.combined_statistic_ids),
                 "latest_interval_data_point": import_stats.latest_interval_data_point,
                 "feed_lag_hours": feed_lag_hours,
+                "statistics_import_paused": bool(paused_nmis),
+                "statistics_paused_nmi_count": len(paused_nmis),
                 "last_error": "",
                 "last_sync": datetime.now(tz=UTC),
             }
@@ -218,6 +517,87 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
             raise UpdateFailed(exception) from exception
         except SAPowerNetworksApiClientError as exception:
             raise UpdateFailed(exception) from exception
+
+    async def _async_check_legacy_statistics(
+        self,
+        assignments: list[NmiAssignment],
+    ) -> None:
+        """Detect legacy statistics once and keep pending Repairs issues raised."""
+        entry = self.config_entry
+        if (
+            entry_statistics_migration_state(entry) == STATISTICS_MIGRATION_CHECK
+            and assignments
+        ):
+            existing_statistic_ids = await self._async_existing_statistic_ids()
+            completed_digests = completed_statistics_digests(self.hass)
+            pending_digests = sorted(
+                {
+                    statistic_digest(assignment.nmi)
+                    for assignment in assignments
+                    if statistic_digest(assignment.nmi) not in completed_digests
+                    if any(
+                        statistic_id.startswith(self._statistic_prefix(assignment.nmi))
+                        for statistic_id in existing_statistic_ids
+                    )
+                }
+            )
+            self.hass.config_entries.async_update_entry(
+                entry,
+                data={
+                    **entry.data,
+                    STATISTICS_MIGRATION: (
+                        STATISTICS_MIGRATION_PENDING
+                        if pending_digests
+                        else STATISTICS_MIGRATION_DONE
+                    ),
+                    STATISTICS_MIGRATION_PENDING_DIGESTS: pending_digests,
+                },
+            )
+            if pending_digests:
+                LOGGER.warning(
+                    "Legacy statistics found for %s NMI(s); statistics import is "
+                    "paused until the Repairs issue is resolved",
+                    len(pending_digests),
+                )
+
+        pending_digests_for_entry = entry_pending_statistics_digests(entry)
+        for assignment in assignments:
+            digest = statistic_digest(assignment.nmi)
+            if digest in pending_digests_for_entry:
+                async_create_legacy_statistics_issue(self.hass, digest, assignment.nmi)
+
+    async def _async_acquire_sync_locks(
+        self,
+        assignments: list[NmiAssignment],
+    ) -> tuple[list[NmiAssignment], list[asyncio.Lock]]:
+        """Return assignments allowed to import and the digest locks now held."""
+        paused_digests = pending_statistics_digests(self.hass)
+        held_digests: set[str] = set()
+        held_locks: list[asyncio.Lock] = []
+        active_assignments: list[NmiAssignment] = []
+        for assignment in assignments:
+            digest = statistic_digest(assignment.nmi)
+            if digest in paused_digests:
+                LOGGER.debug(
+                    "Statistics import paused for %s pending legacy migration",
+                    mask_identifier(assignment.nmi),
+                )
+                continue
+            if digest not in held_digests:
+                lock = get_statistics_rebuild_lock(self.hass, digest)
+                if lock.locked():
+                    LOGGER.debug(
+                        "Statistics import skipped for %s while another task is "
+                        "writing its statistics",
+                        mask_identifier(assignment.nmi),
+                    )
+                    continue
+                # An unlocked asyncio.Lock is acquired without yielding.
+                await lock.acquire()
+                held_digests.add(digest)
+                held_locks.append(lock)
+            active_assignments.append(assignment)
+        return active_assignments, held_locks
 
     async def _async_sync_statistics(
         self,
@@ -577,38 +957,14 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
         )
         parsed = parse_nem12_content(raw_csv)
 
-        total_rows = 0
-        total_channels = 0
-        statistic_ids: list[str] = []
         import_points_by_nmi = self._interval_import_points_by_nmi(parsed)
-        for (nmi, suffix), readings in parsed.items():
-            hourly_totals = self._complete_hourly_totals(readings)
-
-            statistic_id = self._statistic_id(nmi, suffix)
-            last_start_ts, last_sum = await self._async_last_statistic_snapshot(
-                statistic_id
-            )
-            statistics = self._build_statistics(
-                hourly_totals,
-                last_start_ts,
-                last_sum,
-            )
-            if not statistics:
-                continue
-
-            async_add_external_statistics(
-                self.hass,
-                self._statistic_metadata(nmi, suffix, statistic_id),
-                statistics,
-            )
-            total_rows += len(statistics)
-            total_channels += 1
-            statistic_ids.append(statistic_id)
-
+        result = self._write_statistics(
+            await self._async_prepare_interval_statistics(parsed)
+        )
         return ImportBatchResult(
-            rows_imported=total_rows,
-            channels_imported=total_channels,
-            statistic_ids=tuple(statistic_ids),
+            rows_imported=result.rows_imported,
+            channels_imported=result.channels_imported,
+            statistic_ids=result.statistic_ids,
             import_points_by_nmi=import_points_by_nmi,
             latest_interval_data_point=max(
                 (
@@ -619,6 +975,64 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
                 default=None,
             ),
         )
+
+    async def _async_statistic_checkpoint(
+        self,
+        statistic_id: str,
+        *,
+        from_scratch: bool,
+    ) -> tuple[float | None, float]:
+        """Return the import checkpoint, or an empty one when rebuilding."""
+        if from_scratch:
+            return None, 0.0
+        return await self._async_last_statistic_snapshot(statistic_id)
+
+    def _write_statistics(
+        self,
+        prepared: list[PreparedStatistics],
+    ) -> ImportBatchResult:
+        """Write prepared statistics batches to the recorder."""
+        total_rows = 0
+        statistic_ids: list[str] = []
+        for metadata, statistics in prepared:
+            async_add_external_statistics(self.hass, metadata, statistics)
+            total_rows += len(statistics)
+            statistic_ids.append(metadata["statistic_id"])
+        return ImportBatchResult(
+            rows_imported=total_rows,
+            channels_imported=len(statistic_ids),
+            statistic_ids=tuple(statistic_ids),
+            import_points_by_nmi={},
+        )
+
+    async def _async_prepare_interval_statistics(
+        self,
+        parsed: dict[tuple[str, str], list[IntervalReading]],
+        *,
+        from_scratch: bool = False,
+    ) -> list[PreparedStatistics]:
+        """Build new hourly statistics for each parsed detailed channel."""
+        prepared: list[PreparedStatistics] = []
+        for (nmi, suffix), readings in parsed.items():
+            hourly_totals = self._complete_hourly_totals(readings)
+
+            statistic_id = self._statistic_id(nmi, suffix)
+            last_start_ts, last_sum = await self._async_statistic_checkpoint(
+                statistic_id,
+                from_scratch=from_scratch,
+            )
+            statistics = self._build_statistics(
+                hourly_totals,
+                last_start_ts,
+                last_sum,
+            )
+            if not statistics:
+                continue
+
+            prepared.append(
+                (self._statistic_metadata(nmi, suffix, statistic_id), statistics)
+            )
+        return prepared
 
     async def _async_backfill_combined_source_history(
         self,
@@ -724,14 +1138,29 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
         )
         periods = parse_summary_csv(raw_csv)
 
-        total_rows = 0
-        total_channels = 0
-        statistic_ids: list[str] = []
         import_points_by_nmi = self._summary_import_points_by_nmi(periods)
+        result = self._write_statistics(
+            await self._async_prepare_accumulated_statistics(periods)
+        )
+        return ImportBatchResult(
+            rows_imported=result.rows_imported,
+            channels_imported=result.channels_imported,
+            statistic_ids=result.statistic_ids,
+            import_points_by_nmi=import_points_by_nmi,
+        )
+
+    async def _async_prepare_accumulated_statistics(
+        self,
+        periods: list[SummaryPeriod],
+        *,
+        from_scratch: bool = False,
+    ) -> list[PreparedStatistics]:
+        """Build new accumulated import/export statistics for parsed periods."""
         grouped_periods: dict[str, list[SummaryPeriod]] = {}
         for period in periods:
             grouped_periods.setdefault(period.nmi, []).append(period)
 
+        prepared: list[PreparedStatistics] = []
         for nmi, nmi_periods in grouped_periods.items():
             for direction, direction_periods in (
                 ("accumulated_import", nmi_periods),
@@ -744,8 +1173,9 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
                     continue
 
                 statistic_id = self._summary_statistic_id(nmi, direction)
-                last_start_ts, last_sum = await self._async_last_statistic_snapshot(
-                    statistic_id
+                last_start_ts, last_sum = await self._async_statistic_checkpoint(
+                    statistic_id,
+                    from_scratch=from_scratch,
                 )
                 statistics = self._build_summary_statistics(
                     direction_periods,
@@ -756,25 +1186,17 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
                 if not statistics:
                     continue
 
-                async_add_external_statistics(
-                    self.hass,
-                    self._summary_statistic_metadata(
-                        nmi,
-                        direction,
-                        statistic_id,
-                    ),
-                    statistics,
+                prepared.append(
+                    (
+                        self._summary_statistic_metadata(
+                            nmi,
+                            direction,
+                            statistic_id,
+                        ),
+                        statistics,
+                    )
                 )
-                total_rows += len(statistics)
-                total_channels += 1
-                statistic_ids.append(statistic_id)
-
-        return ImportBatchResult(
-            rows_imported=total_rows,
-            channels_imported=total_channels,
-            statistic_ids=tuple(statistic_ids),
-            import_points_by_nmi=import_points_by_nmi,
-        )
+        return prepared
 
     async def _async_sync_combined_import_statistics(
         self,
@@ -783,8 +1205,53 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
         interval_import_points: tuple[tuple[datetime, float], ...],
     ) -> ImportBatchResult:
         """Import a combined stream when source streams are consecutive."""
-        if not accumulated_import_points or not interval_import_points:
+        prepared = await self._async_prepare_combined_statistics(
+            nmi,
+            accumulated_import_points,
+            interval_import_points,
+        )
+        if prepared is None:
             return ImportBatchResult(import_points_by_nmi={})
+        return self._write_statistics([prepared])
+
+    async def _async_prepare_combined_statistics(
+        self,
+        nmi: str,
+        accumulated_import_points: tuple[tuple[datetime, float], ...],
+        interval_import_points: tuple[tuple[datetime, float], ...],
+        *,
+        from_scratch: bool = False,
+    ) -> PreparedStatistics | None:
+        """Build new combined statistics when source streams are consecutive."""
+        combined_points = self._combined_import_points(
+            accumulated_import_points,
+            interval_import_points,
+        )
+        if not combined_points:
+            return None
+
+        statistic_id = self._combined_statistic_id(nmi)
+        last_start_ts, last_sum = await self._async_statistic_checkpoint(
+            statistic_id,
+            from_scratch=from_scratch,
+        )
+        statistics = self._build_combined_statistics(
+            combined_points,
+            last_start_ts,
+            last_sum,
+        )
+        if not statistics:
+            return None
+        return self._combined_statistic_metadata(nmi, statistic_id), statistics
+
+    @staticmethod
+    def _combined_import_points(
+        accumulated_import_points: tuple[tuple[datetime, float], ...],
+        interval_import_points: tuple[tuple[datetime, float], ...],
+    ) -> list[tuple[datetime, float]]:
+        """Join consecutive accumulated and interval points into one timeline."""
+        if not accumulated_import_points or not interval_import_points:
+            return []
 
         sorted_accumulated = sorted(accumulated_import_points)
         sorted_interval = sorted(interval_import_points)
@@ -792,9 +1259,9 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
         accumulated_end = sorted_accumulated[-1][0]
         interval_start = sorted_interval[0][0]
         if interval_start < accumulated_end:
-            return ImportBatchResult(import_points_by_nmi={})
+            return []
         if interval_start - accumulated_end > timedelta(days=1):
-            return ImportBatchResult(import_points_by_nmi={})
+            return []
 
         combined_values_by_start: dict[datetime, float] = defaultdict(float)
         for point_start, point_value in sorted_accumulated:
@@ -803,33 +1270,7 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
         for point_start, point_value in sorted_interval:
             if point_start >= interval_start:
                 combined_values_by_start[point_start] += point_value
-        combined_points = sorted(combined_values_by_start.items())
-        if not combined_points:
-            return ImportBatchResult(import_points_by_nmi={})
-
-        statistic_id = self._combined_statistic_id(nmi)
-        last_start_ts, last_sum = await self._async_last_statistic_snapshot(
-            statistic_id
-        )
-        statistics = self._build_combined_statistics(
-            combined_points,
-            last_start_ts,
-            last_sum,
-        )
-        if not statistics:
-            return ImportBatchResult(import_points_by_nmi={})
-
-        async_add_external_statistics(
-            self.hass,
-            self._combined_statistic_metadata(nmi, statistic_id),
-            statistics,
-        )
-        return ImportBatchResult(
-            rows_imported=len(statistics),
-            channels_imported=1,
-            statistic_ids=(statistic_id,),
-            import_points_by_nmi={},
-        )
+        return sorted(combined_values_by_start.items())
 
     async def _async_sync_combined_statistics_from_interval(
         self,
@@ -855,62 +1296,9 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
         if not statistics:
             return ImportBatchResult(import_points_by_nmi={})
 
-        async_add_external_statistics(
-            self.hass,
-            self._combined_statistic_metadata(nmi, statistic_id),
-            statistics,
+        return self._write_statistics(
+            [(self._combined_statistic_metadata(nmi, statistic_id), statistics)]
         )
-        return ImportBatchResult(
-            rows_imported=len(statistics),
-            channels_imported=1,
-            statistic_ids=(statistic_id,),
-            import_points_by_nmi={},
-        )
-
-    async def _async_sync_accumulated_statistics_for_nmi(
-        self,
-        nmi: str,
-        nmi_periods: list[SummaryPeriod],
-    ) -> tuple[int, int]:
-        """Build and import accumulated streams for one parsed NMI."""
-        total_rows = 0
-        total_channels = 0
-        for direction, direction_periods in (
-            ("accumulated_import", nmi_periods),
-            (
-                "accumulated_export",
-                [period for period in nmi_periods if period.export_kwh > 0],
-            ),
-        ):
-            if not direction_periods:
-                continue
-
-            statistic_id = self._summary_statistic_id(nmi, direction)
-            last_start_ts, last_sum = await self._async_last_statistic_snapshot(
-                statistic_id
-            )
-            statistics = self._build_summary_statistics(
-                direction_periods,
-                direction,
-                last_start_ts,
-                last_sum,
-            )
-            if not statistics:
-                continue
-
-            async_add_external_statistics(
-                self.hass,
-                self._summary_statistic_metadata(
-                    nmi,
-                    direction,
-                    statistic_id,
-                ),
-                statistics,
-            )
-            total_rows += len(statistics)
-            total_channels += 1
-
-        return total_rows, total_channels
 
     async def _async_existing_statistic_ids(self) -> set[str]:
         """Return existing recorder statistic ids for this integration."""
@@ -1209,29 +1597,28 @@ class SAPowerNetworksDataUpdateCoordinator(DataUpdateCoordinator):
 
     def _statistic_id(self, nmi: str, suffix: str) -> str:
         """Create a privacy-safe deterministic statistic id for one channel."""
-        digest = sha256(nmi.encode("utf-8")).hexdigest()[:12]
+        digest = statistic_digest(nmi)
         channel = self._slugify(self._channel_direction(suffix))
         suffix_slug = self._slugify(suffix)
         return f"{DOMAIN}:{digest}_{channel}_{suffix_slug}"
 
     def _statistic_prefix(self, nmi: str) -> str:
         """Return the privacy-safe prefix shared by all statistic ids for an NMI."""
-        digest = sha256(nmi.encode("utf-8")).hexdigest()[:12]
-        return f"{DOMAIN}:{digest}_"
+        return statistic_digest_prefix(statistic_digest(nmi))
 
     def _summary_statistic_id(self, nmi: str, direction: str) -> str:
         """Create a privacy-safe deterministic statistic id for accumulated data."""
-        digest = sha256(nmi.encode("utf-8")).hexdigest()[:12]
+        digest = statistic_digest(nmi)
         return f"{DOMAIN}:{digest}_{self._slugify(direction)}"
 
     def _combined_statistic_id(self, nmi: str) -> str:
         """Create a privacy-safe deterministic statistic id for combined imports."""
-        digest = sha256(nmi.encode("utf-8")).hexdigest()[:12]
+        digest = statistic_digest(nmi)
         return f"{DOMAIN}:{digest}_combined_import"
 
     def _summary_statistic_prefix(self, nmi: str) -> str:
         """Return the shared prefix used by accumulated summary statistic ids."""
-        digest = sha256(nmi.encode("utf-8")).hexdigest()[:12]
+        digest = statistic_digest(nmi)
         return f"{DOMAIN}:{digest}_accumulated_"
 
     @staticmethod
