@@ -251,8 +251,10 @@ exact transitive pins are updated through the plugin rather than independently.
 This does not change the minimum supported Home Assistant version in `hacs.json`.
 
 The minimum-version test profile uses an isolated environment and the matching
-plugin pinned in `tests/requirements-min-ha.txt`, not the default lockfile. When
-raising the minimum in `hacs.json`, update that plugin pin to match. Security fixes
+plugin pinned in `tests/requirements-min-ha.txt`, not the default lockfile.
+Dependabot excludes this compatibility baseline so default test-stack updates do
+not change it. When raising the minimum in `hacs.json`, update that plugin pin
+to match. Security fixes
 in Home Assistant's pinned dependencies may require a newer Home Assistant release;
 the integration itself does not install these development dependencies.
 
